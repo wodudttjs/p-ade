@@ -4,6 +4,7 @@
 PySide6 기반 GUI 대시보드 메인 윈도우
 """
 
+import os
 import sys
 import subprocess
 import threading
@@ -15,7 +16,7 @@ from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QStackedWidget, QFrame, QLabel, QMessageBox,
-    QProgressBar, QGroupBox
+    QProgressBar, QGroupBox, QLineEdit, QSpinBox
 )
 from PySide6.QtGui import QIcon, QFont
 
@@ -221,6 +222,53 @@ class DashboardApp(QMainWindow):
         """)
         btn_layout.addWidget(self.btn_stop)
         
+        # 검색어 입력
+        query_layout = QHBoxLayout()
+        query_label = QLabel("Query:")
+        query_label.setStyleSheet("font-size: 11px;")
+        query_layout.addWidget(query_label)
+        
+        self.query_input = QLineEdit()
+        self.query_input.setPlaceholderText("2족보행, 로봇, 걷기...")
+        self.query_input.setText("2족보행 로봇")
+        self.query_input.setFixedHeight(28)
+        self.query_input.setStyleSheet(f"""
+            QLineEdit {{
+                background: {Colors.BG_MAIN};
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                padding: 4px 8px;
+                color: {Colors.TEXT_PRIMARY};
+            }}
+        """)
+        query_layout.addWidget(self.query_input)
+        btn_layout.addLayout(query_layout)
+        
+        # 수집 설정 (Videos, Workers)
+        settings_layout = QHBoxLayout()
+        
+        count_label = QLabel("Videos:")
+        count_label.setStyleSheet("font-size: 11px;")
+        settings_layout.addWidget(count_label)
+        
+        self.video_count_spin = QSpinBox()
+        self.video_count_spin.setRange(1, 100)
+        self.video_count_spin.setValue(5)
+        self.video_count_spin.setFixedWidth(50)
+        settings_layout.addWidget(self.video_count_spin)
+        
+        workers_label = QLabel("Workers:")
+        workers_label.setStyleSheet("font-size: 11px;")
+        settings_layout.addWidget(workers_label)
+        
+        self.workers_spin = QSpinBox()
+        self.workers_spin.setRange(1, 8)
+        self.workers_spin.setValue(2)
+        self.workers_spin.setFixedWidth(50)
+        settings_layout.addWidget(self.workers_spin)
+        
+        btn_layout.addLayout(settings_layout)
+        
         control_layout.addWidget(btn_group)
         
         # 진행 상황 표시
@@ -231,9 +279,10 @@ class DashboardApp(QMainWindow):
         self.progress_bars = {}
         stages = [
             ("download", "📥 Download", Colors.ACCENT_BLUE),
-            ("extract", "🔍 Extract Poses", Colors.ACCENT_PURPLE),
-            ("filter", "✨ Filter Quality", Colors.ACCENT_GREEN),
-            ("encode", "🔧 Encode Actions", Colors.ACCENT_YELLOW),
+            ("extract", "🔍 Extract", Colors.ACCENT_PURPLE),
+            ("filter", "✨ Filter", Colors.ACCENT_GREEN),
+            ("encode", "🔧 Encode", Colors.ACCENT_YELLOW),
+            ("upload", "☁️ Upload", Colors.ACCENT_BLUE),
         ]
         
         progress_grid = QHBoxLayout()
@@ -446,9 +495,18 @@ class DashboardApp(QMainWindow):
             try:
                 self._worker_signals.started.emit()
                 
+                # 설정값 가져오기
+                query = self.query_input.text().strip() or "2족보행 로봇"
+                video_count = self.video_count_spin.value()
+                workers = self.workers_spin.value()
+                
                 # 1. Download 단계
                 self._worker_signals.progress.emit("download", 0, 100)
-                self._run_stage_script("parallel_download.py", ["--workers", "2", "--limit", "5"])
+                self._run_stage_script("parallel_download.py", [
+                    "--query", query,
+                    "--workers", str(workers),
+                    "--limit", str(video_count)
+                ])
                 self._worker_signals.progress.emit("download", 100, 100)
                 
                 if not self._is_collecting:
@@ -464,10 +522,7 @@ class DashboardApp(QMainWindow):
                 
                 # 3. Filter 단계
                 self._worker_signals.progress.emit("filter", 0, 100)
-                self._run_stage_script("filter_quality.py", [
-                    str(self._project_root / "data" / "poses"),
-                    str(self._project_root / "data" / "filtered")
-                ])
+                self._run_stage_script("filter_quality.py", ["--all", "--update-db"])
                 self._worker_signals.progress.emit("filter", 100, 100)
                 
                 if not self._is_collecting:
@@ -475,11 +530,16 @@ class DashboardApp(QMainWindow):
                 
                 # 4. Encode 단계
                 self._worker_signals.progress.emit("encode", 0, 100)
-                self._run_stage_script("encode_actions.py", [
-                    str(self._project_root / "data" / "filtered"),
-                    str(self._project_root / "data" / "episodes")
-                ])
+                self._run_stage_script("encode_actions.py", ["--all"])
                 self._worker_signals.progress.emit("encode", 100, 100)
+                
+                if not self._is_collecting:
+                    return
+                
+                # 5. Upload 단계 (클라우드)
+                self._worker_signals.progress.emit("upload", 0, 100)
+                self._run_stage_script("upload_to_s3.py", ["--all"])
+                self._worker_signals.progress.emit("upload", 100, 100)
                 
                 self._worker_signals.stopped.emit()
                 
@@ -500,13 +560,20 @@ class DashboardApp(QMainWindow):
         cmd = [sys.executable, str(script_path)] + args
         self._worker_signals.log.emit(f"Running: {script_name}")
         
+        # 환경 변수 설정 (인코딩 문제 해결)
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        
         try:
             self._collection_process = subprocess.Popen(
                 cmd,
                 cwd=str(self._project_root),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                text=True
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
             )
             
             # 출력 읽기

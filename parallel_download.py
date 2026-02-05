@@ -28,6 +28,15 @@ sys.path.insert(0, str(project_root))
 from core.logging_config import setup_logger
 from core.queue_manager import QueueManager, TaskPriority
 
+# DB 저장용 import
+try:
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from models.database import Video
+    HAS_DB = True
+except ImportError:
+    HAS_DB = False
+
 logger = setup_logger(__name__)
 
 
@@ -52,6 +61,7 @@ def download_single(
 ) -> DownloadResult:
     """단일 비디오 다운로드"""
     import subprocess
+    import shutil
     
     start_time = time.time()
     output_path = output_dir / f"{video_id}.mp4"
@@ -67,9 +77,26 @@ def download_single(
             skipped=True,
         )
     
+    # yt-dlp 경로 찾기
+    yt_dlp_path = shutil.which("yt-dlp")
+    if not yt_dlp_path:
+        venv_yt_dlp = Path(sys.executable).parent / "yt-dlp.exe"
+        if venv_yt_dlp.exists():
+            yt_dlp_path = str(venv_yt_dlp)
+        else:
+            yt_dlp_path = None
+    
+    if not yt_dlp_path:
+        return DownloadResult(
+            video_id=video_id,
+            url=url,
+            success=False,
+            error="yt-dlp not found",
+        )
+    
     try:
         cmd = [
-            "yt-dlp",
+            yt_dlp_path,
             "-f", "best[height<=720]",
             "-o", str(output_path),
             "--no-playlist",
@@ -218,18 +245,79 @@ def parallel_download(
     if success > 0:
         print(f"  📈 평균 속도: {total_size / total_time / (1024**2):.2f} MB/s")
     
+    # DB에 저장
+    saved_count = save_results_to_db(results, videos)
+    if saved_count > 0:
+        print(f"  💾 DB 저장: {saved_count}개")
+    
     return results
+
+
+def save_results_to_db(results: List[DownloadResult], videos: List[Dict[str, str]]) -> int:
+    """다운로드 결과를 DB에 저장"""
+    if not HAS_DB:
+        return 0
+    
+    try:
+        db_path = project_root / "data" / "pade.db"
+        engine = create_engine(f"sqlite:///{db_path}")
+        Session = sessionmaker(bind=engine)
+        session = Session()
+        
+        saved = 0
+        video_info = {v["video_id"]: v for v in videos}
+        
+        for result in results:
+            if not result.success:
+                continue
+            
+            # 이미 존재하는지 확인
+            existing = session.query(Video).filter_by(video_id=result.video_id).first()
+            if existing:
+                continue
+            
+            info = video_info.get(result.video_id, {})
+            video = Video(
+                video_id=result.video_id,
+                platform="youtube",
+                url=result.url,
+                title=info.get("title", "Unknown"),
+                local_path=result.video_path,
+                downloaded_at=datetime.now(),
+                status="downloaded",
+            )
+            session.add(video)
+            saved += 1
+        
+        session.commit()
+        session.close()
+        return saved
+        
+    except Exception as e:
+        logger.error(f"DB 저장 실패: {e}")
+        return 0
 
 
 def search_youtube(query: str, limit: int = 10) -> List[Dict[str, str]]:
     """YouTube 검색"""
     import subprocess
     import json
+    import shutil
     
     print(f"🔍 YouTube 검색: '{query}' (limit={limit})")
     
+    # yt-dlp 경로 찾기 (venv 내 또는 시스템)
+    yt_dlp_path = shutil.which("yt-dlp")
+    if not yt_dlp_path:
+        venv_yt_dlp = Path(sys.executable).parent / "yt-dlp.exe"
+        if venv_yt_dlp.exists():
+            yt_dlp_path = str(venv_yt_dlp)
+        else:
+            logger.error("yt-dlp not found")
+            return []
+    
     cmd = [
-        "yt-dlp",
+        yt_dlp_path,
         f"ytsearch{limit}:{query}",
         "--flat-playlist",
         "--dump-json",
