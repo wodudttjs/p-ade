@@ -63,8 +63,12 @@ def test_config_database_url_format():
     
     db_url = config.DATABASE_URL
     assert isinstance(db_url, str)
-    assert db_url.startswith('postgresql://'), "PostgreSQL URL 형식이 아닙니다"
-    assert '@' in db_url, "데이터베이스 URL에 호스트 정보가 없습니다"
+    # 테스트 환경에서는 SQLite를 사용
+    if config.TESTING:
+        assert db_url.startswith('sqlite://'), "테스트 환경에서 SQLite URL 형식이 아닙니다"
+    else:
+        assert db_url.startswith('postgresql://'), "PostgreSQL URL 형식이 아닙니다"
+        assert '@' in db_url, "데이터베이스 URL에 호스트 정보가 없습니다"
 
 
 def test_config_redis_url_format():
