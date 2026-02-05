@@ -95,7 +95,9 @@ class QualityStats:
     confidence_mean: float = 0.0
     confidence_std: float = 0.0
     jitter_mean: float = 0.0
+    jitter_std: float = 0.0
     jitter_p95: float = 0.0
+    length_mean: float = 0.0  # alias for CLI
     
     episode_length_mean: float = 0.0
     nan_ratio_mean: float = 0.0

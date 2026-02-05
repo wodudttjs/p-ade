@@ -11,13 +11,34 @@ from dataclasses import asdict
 from sqlalchemy import create_engine, func, text, and_, or_
 from sqlalchemy.orm import sessionmaker, Session
 
-from dashboard.models import (
-    JobRow, KPIData, QualityStats, SystemStats,
-    STAGES, STATUSES,
-)
-from core.logging_config import setup_logger
+# 순환 import 방지를 위해 직접 import
+import sys
+import os
+_dashboard_dir = os.path.dirname(__file__)
+if _dashboard_dir not in sys.path:
+    sys.path.insert(0, _dashboard_dir)
 
-logger = setup_logger(__name__)
+# models.py 직접 import (dashboard 패키지 전체 로드 방지)
+import importlib.util
+_models_path = os.path.join(_dashboard_dir, "models.py")
+_spec = importlib.util.spec_from_file_location("dashboard_models", _models_path)
+_models = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_models)
+
+JobRow = _models.JobRow
+KPIData = _models.KPIData
+QualityStats = _models.QualityStats
+SystemStats = _models.SystemStats
+STAGES = _models.STAGES
+STATUSES = _models.STATUSES
+
+# 로깅 설정 (loguru 없으면 기본 logging 사용)
+try:
+    from core.logging_config import setup_logger
+    logger = setup_logger(__name__)
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 
 class DataService:
@@ -320,7 +341,9 @@ class DataService:
                     confidence_mean=stats.conf_mean or 0.0,
                     confidence_std=conf_std,
                     jitter_mean=stats.jitter_mean or 0.0,
+                    jitter_std=0.0,  # TODO: calculate from data
                     jitter_p95=jitter_p95,
+                    length_mean=stats.length_mean or 0.0,
                     episode_length_mean=stats.length_mean or 0.0,
                 )
             finally:
