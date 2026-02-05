@@ -14,9 +14,12 @@ from sqlalchemy.orm import sessionmaker, Session
 # 순환 import 방지를 위해 직접 import
 import sys
 import os
+
+# 프로젝트 루트를 sys.path에 추가 (models.database import를 위해)
 _dashboard_dir = os.path.dirname(__file__)
-if _dashboard_dir not in sys.path:
-    sys.path.insert(0, _dashboard_dir)
+_project_root = os.path.dirname(_dashboard_dir)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 # models.py 직접 import (dashboard 패키지 전체 로드 방지)
 import importlib.util

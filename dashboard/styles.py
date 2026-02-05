@@ -368,6 +368,8 @@ class Colors:
     
     # 배경
     BG_DARK = "#1e1e2e"
+    BG_MAIN = "#1e1e2e"
+    BG_CARD = "#313244"
     BG_SURFACE = "#313244"
     BG_OVERLAY = "#45475a"
     

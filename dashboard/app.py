@@ -5,20 +5,24 @@ PySide6 기반 GUI 대시보드 메인 윈도우
 """
 
 import sys
+import subprocess
+import threading
 from typing import Optional
 from datetime import datetime
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal, QObject
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QStackedWidget, QFrame, QLabel, QMessageBox
+    QPushButton, QStackedWidget, QFrame, QLabel, QMessageBox,
+    QProgressBar, QGroupBox
 )
 from PySide6.QtGui import QIcon, QFont
 
 from dashboard.models import make_mock_jobs
 from dashboard.table_models import JobsTableModel
 from dashboard.pages import OverviewPage, JobsPage, QualityPage, SettingsPage
-from dashboard.widgets import StatusBar
+from dashboard.widgets import StatusBar, ProgressCard
 from dashboard.styles import DARK_THEME, LIGHT_THEME, Colors
 
 # DataService import (실제 DB 연동)
@@ -27,6 +31,15 @@ try:
     HAS_DATA_SERVICE = True
 except ImportError:
     HAS_DATA_SERVICE = False
+
+
+class WorkerSignals(QObject):
+    """워커 스레드 시그널"""
+    started = Signal()
+    stopped = Signal()
+    progress = Signal(str, int, int)  # stage, current, total
+    error = Signal(str)
+    log = Signal(str)
 
 
 class SidebarButton(QPushButton):
@@ -109,6 +122,14 @@ class DashboardApp(QMainWindow):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._on_refresh)
         
+        # 프로젝트 루트
+        self._project_root = Path(__file__).parent.parent
+        
+        # 수집 프로세스 관리
+        self._collection_process = None
+        self._is_collecting = False
+        self._worker_signals = WorkerSignals()
+        
         # DataService 초기화
         self._data_service = None
         self._use_real_data = False
@@ -122,6 +143,14 @@ class DashboardApp(QMainWindow):
         self._setup_ui()
         self._connect_signals()
         self._apply_theme()
+        
+        # DB 데이터 자동 새로고침 (5초마다)
+        self._db_refresh_timer = QTimer(self)
+        self._db_refresh_timer.timeout.connect(self._refresh_db_stats)
+        self._db_refresh_timer.start(5000)
+        
+        # 초기 DB 통계 로드
+        self._refresh_db_stats()
         
         # 상태 표시
         if self._use_real_data:
@@ -151,7 +180,162 @@ class DashboardApp(QMainWindow):
         content_layout = QVBoxLayout(content_frame)
         content_layout.setContentsMargins(0, 0, 0, 0)
         
-        # 상단 툴바
+        # ===== 상단 컨트롤 패널 (Start/Stop 버튼 + 진행 상황) =====
+        control_panel = QWidget()
+        control_panel.setFixedHeight(120)
+        control_panel.setStyleSheet(f"background: {Colors.BG_CARD}; border-bottom: 1px solid {Colors.BORDER};")
+        control_layout = QHBoxLayout(control_panel)
+        control_layout.setContentsMargins(20, 10, 20, 10)
+        
+        # Start/Stop 버튼 그룹
+        btn_group = QGroupBox("Pipeline Control")
+        btn_group.setFixedWidth(200)
+        btn_layout = QVBoxLayout(btn_group)
+        
+        self.btn_start = QPushButton("▶ Start Collection")
+        self.btn_start.setFixedHeight(36)
+        self.btn_start.setStyleSheet(f"""
+            QPushButton {{
+                background: {Colors.SUCCESS};
+                color: white;
+                font-weight: 600;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ background: #27ae60; }}
+            QPushButton:disabled {{ background: {Colors.TEXT_MUTED}; }}
+        """)
+        btn_layout.addWidget(self.btn_start)
+        
+        self.btn_stop = QPushButton("■ Stop")
+        self.btn_stop.setFixedHeight(36)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setStyleSheet(f"""
+            QPushButton {{
+                background: {Colors.ERROR};
+                color: white;
+                font-weight: 600;
+                border-radius: 4px;
+            }}
+            QPushButton:hover {{ background: #c0392b; }}
+            QPushButton:disabled {{ background: {Colors.TEXT_MUTED}; }}
+        """)
+        btn_layout.addWidget(self.btn_stop)
+        
+        control_layout.addWidget(btn_group)
+        
+        # 진행 상황 표시
+        progress_group = QGroupBox("Pipeline Progress")
+        progress_layout = QVBoxLayout(progress_group)
+        
+        # 각 단계별 프로그레스 바
+        self.progress_bars = {}
+        stages = [
+            ("download", "📥 Download", Colors.ACCENT_BLUE),
+            ("extract", "🔍 Extract Poses", Colors.ACCENT_PURPLE),
+            ("filter", "✨ Filter Quality", Colors.ACCENT_GREEN),
+            ("encode", "🔧 Encode Actions", Colors.ACCENT_YELLOW),
+        ]
+        
+        progress_grid = QHBoxLayout()
+        for stage_id, stage_name, color in stages:
+            stage_widget = QWidget()
+            stage_layout = QVBoxLayout(stage_widget)
+            stage_layout.setContentsMargins(5, 0, 5, 0)
+            stage_layout.setSpacing(2)
+            
+            label = QLabel(stage_name)
+            label.setStyleSheet(f"font-size: 11px; color: {Colors.TEXT_SECONDARY};")
+            stage_layout.addWidget(label)
+            
+            pbar = QProgressBar()
+            pbar.setMaximum(100)
+            pbar.setValue(0)
+            pbar.setTextVisible(True)
+            pbar.setFixedHeight(20)
+            pbar.setStyleSheet(f"""
+                QProgressBar {{
+                    border: 1px solid {Colors.BORDER};
+                    border-radius: 4px;
+                    text-align: center;
+                    background: {Colors.BG_MAIN};
+                }}
+                QProgressBar::chunk {{
+                    background: {color};
+                    border-radius: 3px;
+                }}
+            """)
+            stage_layout.addWidget(pbar)
+            
+            self.progress_bars[stage_id] = pbar
+            progress_grid.addWidget(stage_widget)
+        
+        progress_layout.addLayout(progress_grid)
+        
+        # 전체 진행률
+        total_layout = QHBoxLayout()
+        total_label = QLabel("Total Progress:")
+        total_label.setStyleSheet("font-weight: 600;")
+        total_layout.addWidget(total_label)
+        
+        self.total_progress = QProgressBar()
+        self.total_progress.setMaximum(100)
+        self.total_progress.setValue(0)
+        self.total_progress.setFixedHeight(24)
+        self.total_progress.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid {Colors.BORDER};
+                border-radius: 4px;
+                text-align: center;
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 {Colors.ACCENT_BLUE}, stop:1 {Colors.ACCENT_GREEN});
+                border-radius: 3px;
+            }}
+        """)
+        total_layout.addWidget(self.total_progress)
+        
+        self.progress_status = QLabel("Ready")
+        self.progress_status.setFixedWidth(150)
+        self.progress_status.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        total_layout.addWidget(self.progress_status)
+        
+        progress_layout.addLayout(total_layout)
+        
+        control_layout.addWidget(progress_group, 1)
+        
+        # DB 통계 요약
+        db_group = QGroupBox("Database Stats")
+        db_group.setFixedWidth(200)
+        db_layout = QVBoxLayout(db_group)
+        
+        self.db_stats_labels = {}
+        db_items = [
+            ("videos", "📹 Videos:"),
+            ("episodes", "🎬 Episodes:"),
+            ("jobs", "📋 Jobs:"),
+            ("storage", "💾 Storage:"),
+        ]
+        
+        for key, label_text in db_items:
+            row = QHBoxLayout()
+            label = QLabel(label_text)
+            label.setStyleSheet(f"font-size: 11px;")
+            row.addWidget(label)
+            
+            value = QLabel("—")
+            value.setStyleSheet(f"font-size: 11px; font-weight: 600; color: {Colors.ACCENT_BLUE};")
+            value.setAlignment(Qt.AlignRight)
+            row.addWidget(value)
+            
+            self.db_stats_labels[key] = value
+            db_layout.addLayout(row)
+        
+        control_layout.addWidget(db_group)
+        
+        content_layout.addWidget(control_panel)
+        
+        # ===== 상단 툴바 =====
         toolbar = QWidget()
         toolbar.setFixedHeight(50)
         toolbar_layout = QHBoxLayout(toolbar)
@@ -228,8 +412,204 @@ class DashboardApp(QMainWindow):
         self.btn_refresh.clicked.connect(self._on_refresh)
         self.btn_theme.clicked.connect(self._toggle_theme)
         
+        # Start/Stop 버튼
+        self.btn_start.clicked.connect(self._start_collection)
+        self.btn_stop.clicked.connect(self._stop_collection)
+        
+        # 워커 시그널
+        self._worker_signals.started.connect(self._on_collection_started)
+        self._worker_signals.stopped.connect(self._on_collection_stopped)
+        self._worker_signals.progress.connect(self._on_progress_update)
+        self._worker_signals.log.connect(self._on_log_message)
+        
         # 설정 페이지 새로고침 간격
         self.settings_page.refresh_combo.currentTextChanged.connect(self._on_refresh_interval_changed)
+    
+    def _start_collection(self):
+        """영상 수집 시작"""
+        if self._is_collecting:
+            return
+        
+        self._is_collecting = True
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self.progress_status.setText("Starting...")
+        self.statusBar().showMessage("🚀 Collection started")
+        
+        # 프로그레스 바 리셋
+        for pbar in self.progress_bars.values():
+            pbar.setValue(0)
+        self.total_progress.setValue(0)
+        
+        # 백그라운드 스레드에서 수집 실행
+        def run_collection():
+            try:
+                self._worker_signals.started.emit()
+                
+                # 1. Download 단계
+                self._worker_signals.progress.emit("download", 0, 100)
+                self._run_stage_script("parallel_download.py", ["--workers", "2", "--limit", "5"])
+                self._worker_signals.progress.emit("download", 100, 100)
+                
+                if not self._is_collecting:
+                    return
+                
+                # 2. Extract 단계
+                self._worker_signals.progress.emit("extract", 0, 100)
+                self._run_stage_script("extract_poses.py", ["--all"])
+                self._worker_signals.progress.emit("extract", 100, 100)
+                
+                if not self._is_collecting:
+                    return
+                
+                # 3. Filter 단계
+                self._worker_signals.progress.emit("filter", 0, 100)
+                self._run_stage_script("filter_quality.py", [
+                    str(self._project_root / "data" / "poses"),
+                    str(self._project_root / "data" / "filtered")
+                ])
+                self._worker_signals.progress.emit("filter", 100, 100)
+                
+                if not self._is_collecting:
+                    return
+                
+                # 4. Encode 단계
+                self._worker_signals.progress.emit("encode", 0, 100)
+                self._run_stage_script("encode_actions.py", [
+                    str(self._project_root / "data" / "filtered"),
+                    str(self._project_root / "data" / "episodes")
+                ])
+                self._worker_signals.progress.emit("encode", 100, 100)
+                
+                self._worker_signals.stopped.emit()
+                
+            except Exception as e:
+                self._worker_signals.log.emit(f"Error: {e}")
+                self._worker_signals.stopped.emit()
+        
+        self._collection_thread = threading.Thread(target=run_collection, daemon=True)
+        self._collection_thread.start()
+    
+    def _run_stage_script(self, script_name: str, args: list):
+        """스테이지 스크립트 실행"""
+        script_path = self._project_root / script_name
+        if not script_path.exists():
+            self._worker_signals.log.emit(f"Script not found: {script_name}")
+            return
+        
+        cmd = [sys.executable, str(script_path)] + args
+        self._worker_signals.log.emit(f"Running: {script_name}")
+        
+        try:
+            self._collection_process = subprocess.Popen(
+                cmd,
+                cwd=str(self._project_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True
+            )
+            
+            # 출력 읽기
+            for line in self._collection_process.stdout:
+                if not self._is_collecting:
+                    self._collection_process.terminate()
+                    break
+                line = line.strip()
+                if line:
+                    self._worker_signals.log.emit(line)
+            
+            self._collection_process.wait()
+            
+        except Exception as e:
+            self._worker_signals.log.emit(f"Error running {script_name}: {e}")
+    
+    def _stop_collection(self):
+        """영상 수집 중지"""
+        self._is_collecting = False
+        self.progress_status.setText("Stopping...")
+        self.statusBar().showMessage("⏹ Stopping collection...")
+        
+        if self._collection_process:
+            try:
+                self._collection_process.terminate()
+            except Exception:
+                pass
+    
+    def _on_collection_started(self):
+        """수집 시작됨"""
+        self.progress_status.setText("Running...")
+        self.progress_status.setStyleSheet(f"color: {Colors.SUCCESS};")
+    
+    def _on_collection_stopped(self):
+        """수집 중지됨"""
+        self._is_collecting = False
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self.progress_status.setText("Completed" if self.total_progress.value() >= 100 else "Stopped")
+        self.progress_status.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
+        self.statusBar().showMessage("✓ Collection finished")
+        self._refresh_db_stats()
+    
+    def _on_progress_update(self, stage: str, current: int, total: int):
+        """진행 상황 업데이트"""
+        if stage in self.progress_bars:
+            pct = int(current * 100 / max(total, 1))
+            self.progress_bars[stage].setValue(pct)
+        
+        # 전체 진행률 계산
+        total_pct = sum(pb.value() for pb in self.progress_bars.values()) // len(self.progress_bars)
+        self.total_progress.setValue(total_pct)
+    
+    def _on_log_message(self, message: str):
+        """로그 메시지"""
+        self.statusBar().showMessage(message)
+    
+    def _refresh_db_stats(self):
+        """DB 통계 새로고침"""
+        if not self._use_real_data or not self._data_service:
+            return
+        
+        try:
+            kpi = self._data_service.get_kpi()
+            self.db_stats_labels["videos"].setText(f"{kpi.total_videos}")
+            self.db_stats_labels["episodes"].setText(f"{kpi.episodes:,}")
+            self.db_stats_labels["jobs"].setText(f"{kpi.queue_depth} pending")
+            self.db_stats_labels["storage"].setText(f"{kpi.storage_gb:.1f} GB")
+            
+            # 파이프라인 진행률 계산 (파일 기반)
+            self._update_pipeline_progress()
+            
+        except Exception as e:
+            pass
+    
+    def _update_pipeline_progress(self):
+        """파이프라인 진행률 업데이트 (파일 기반)"""
+        data_dir = self._project_root / "data"
+        
+        # 각 단계 파일 수 확인
+        try:
+            raw_count = len(list((data_dir / "raw").glob("*.mp4"))) if (data_dir / "raw").exists() else 0
+            poses_count = len(list((data_dir / "poses").glob("*.npz"))) if (data_dir / "poses").exists() else 0
+            filtered_count = len(list((data_dir / "filtered").glob("*.npz"))) if (data_dir / "filtered").exists() else 0
+            episodes_count = len(list((data_dir / "episodes").glob("*.npz"))) if (data_dir / "episodes").exists() else 0
+            
+            # 진행률 계산 (이전 단계 대비)
+            if raw_count > 0:
+                self.progress_bars["download"].setValue(100)
+                self.progress_bars["extract"].setValue(min(100, int(poses_count * 100 / raw_count)))
+            
+            if poses_count > 0:
+                self.progress_bars["filter"].setValue(min(100, int(filtered_count * 100 / poses_count)))
+            
+            if filtered_count > 0:
+                self.progress_bars["encode"].setValue(min(100, int(episodes_count * 100 / filtered_count)))
+            
+            # 전체 진행률
+            total_pct = sum(pb.value() for pb in self.progress_bars.values()) // len(self.progress_bars)
+            self.total_progress.setValue(total_pct)
+            
+        except Exception:
+            pass
     
     def _switch_page(self, index: int):
         """페이지 전환"""
