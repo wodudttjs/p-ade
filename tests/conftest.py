@@ -2,12 +2,17 @@
 테스트 설정 및 픽스처
 """
 
+import os
 import pytest
 import tempfile
 import shutil
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+# 테스트 환경 설정 - 모든 import 이전에 설정
+os.environ["ENVIRONMENT"] = "test"
+os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 
 from models.database import Base
 

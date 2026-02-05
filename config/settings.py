@@ -117,6 +117,11 @@ class TestConfig(Config):
     DEBUG = True
     TESTING = True
     DB_NAME = "pade_test_db"
+    
+    @property
+    def DATABASE_URL(self) -> str:
+        """테스트용 SQLite 데이터베이스 URL"""
+        return "sqlite:///:memory:"
 
 
 # 환경별 설정 선택
