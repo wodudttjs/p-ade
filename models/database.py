@@ -179,3 +179,149 @@ class DatasetVersion(Base):
     
     created_at = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
+    
+    # FR-5.3 관계
+    files = relationship("CloudFile", back_populates="dataset_version")
+
+
+class CloudFile(Base):
+    """
+    클라우드 파일 메타데이터
+    
+    FR-5.2: Metadata Database
+    - 클라우드 업로드 파일 추적
+    - SHA256 해시로 무결성 검증
+    - 버전 관리
+    """
+    __tablename__ = 'cloud_files'
+    
+    id = Column(Integer, primary_key=True)
+    
+    # 파일 식별
+    file_id = Column(String(36), unique=True, nullable=False)  # UUID
+    episode_id = Column(Integer, ForeignKey('episodes.id'), nullable=True)
+    video_id = Column(Integer, ForeignKey('videos.id'), nullable=True)
+    dataset_version_id = Column(Integer, ForeignKey('dataset_versions.id'), nullable=True)
+    
+    # 파일 정보
+    file_name = Column(String(255), nullable=False)
+    file_type = Column(String(50), nullable=False)  # episode_npz, video_mp4, manifest_json, etc.
+    file_size_bytes = Column(Integer, nullable=False)
+    
+    # 해시 (무결성)
+    sha256 = Column(String(64), nullable=False, index=True)
+    md5 = Column(String(32))
+    
+    # 클라우드 위치
+    provider = Column(String(20), nullable=False)  # s3, gcs
+    bucket = Column(String(255), nullable=False)
+    key = Column(String(1000), nullable=False)
+    uri = Column(String(1500), nullable=False)
+    
+    # 클라우드 메타데이터
+    etag = Column(String(255))
+    version_id = Column(String(255))
+    storage_class = Column(String(50))
+    
+    # 압축
+    compression = Column(String(20))  # None, gzip, lz4, zstd
+    original_size_bytes = Column(Integer)
+    compression_ratio = Column(Float)
+    
+    # 상태
+    status = Column(String(20), default='uploaded')  # uploaded, verified, archived, deleted
+    verified_at = Column(DateTime)
+    
+    # 메타데이터
+    meta_data = Column(JSON)
+    tags = Column(JSON)
+    
+    # 타임스탬프
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # 관계
+    episode = relationship("Episode", backref="cloud_files")
+    video = relationship("Video", backref="cloud_files")
+    dataset_version = relationship("DatasetVersion", back_populates="files")
+
+
+class UploadTask(Base):
+    """
+    업로드 태스크 추적
+    
+    Celery 태스크 상태 및 결과 추적
+    """
+    __tablename__ = 'upload_tasks'
+    
+    id = Column(Integer, primary_key=True)
+    
+    # 태스크 정보
+    task_id = Column(String(36), unique=True, nullable=False)  # Celery task ID
+    task_type = Column(String(50), nullable=False)  # upload_file, upload_batch
+    
+    # 파일 정보
+    local_path = Column(String(1000), nullable=False)
+    remote_key = Column(String(1000), nullable=False)
+    bucket = Column(String(255), nullable=False)
+    provider = Column(String(20), nullable=False)
+    
+    # 상태
+    status = Column(String(20), default='pending')  # pending, uploading, completed, failed
+    retry_count = Column(Integer, default=0)
+    max_retries = Column(Integer, default=3)
+    
+    # 결과
+    cloud_file_id = Column(Integer, ForeignKey('cloud_files.id'), nullable=True)
+    error_type = Column(String(50))
+    error_message = Column(Text)
+    
+    # 우선순위
+    priority = Column(Integer, default=2)  # 1=high, 2=normal, 3=low
+    
+    # 타임스탬프
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    
+    # 관계
+    cloud_file = relationship("CloudFile", backref="upload_task")
+
+
+class StorageCost(Base):
+    """
+    스토리지 비용 추적
+    
+    FR-5.4: Cost Optimization
+    """
+    __tablename__ = 'storage_costs'
+    
+    id = Column(Integer, primary_key=True)
+    
+    # 기간
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+    
+    # 프로바이더
+    provider = Column(String(20), nullable=False)
+    bucket = Column(String(255))
+    
+    # 용량
+    total_bytes = Column(Integer, default=0)
+    storage_class = Column(String(50))
+    
+    # 비용 (USD)
+    storage_cost = Column(Float, default=0.0)
+    request_cost = Column(Float, default=0.0)
+    transfer_cost = Column(Float, default=0.0)
+    total_cost = Column(Float, default=0.0)
+    
+    # API 호출
+    put_requests = Column(Integer, default=0)
+    get_requests = Column(Integer, default=0)
+    list_requests = Column(Integer, default=0)
+    
+    # 메타데이터
+    meta_data = Column(JSON)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
