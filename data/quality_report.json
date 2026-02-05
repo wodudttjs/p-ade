@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-02-05T22:14:24.917283",
+  "thresholds": {
+    "min_confidence": 0.5,
+    "max_jitter_score": 0.3,
+    "min_episode_frames": 30,
+    "max_nan_ratio": 0.1,
+    "min_visible_joints": 15,
+    "min_pose_completeness": 0.7,
+    "profile": "default"
+  },
+  "summary": {
+    "total_files": 4,
+    "passed": 4,
+    "failed": 0,
+    "pass_rate": 100.0
+  },
+  "quality_stats": {
+    "score_mean": 0.9404110189637035,
+    "score_std": 0.03078401929350012,
+    "score_min": 0.9079742001781661,
+    "score_max": 0.9902149377775347,
+    "score_median": 0.9317274689495565
+  },
+  "confidence_stats": {
+    "mean": 0.7567221875050839,
+    "std": 0.029319572785530285,
+    "min": 0.7068126957002078,
+    "max": 0.7810247854219662
+  },
+  "jitter_stats": {
+    "mean": 0.08938347155444487,
+    "std": 0.046176028940250115,
+    "min": 0.014677593333698155,
+    "max": 0.13803869973275082
+  },
+  "failure_analysis": {},
+  "passed_files": [
+    {
+      "file_path": "data\\poses\\4QjGOajlfGk_pose.npz",
+      "video_id": "4QjGOajlfGk",
+      "passed": true,
+      "quality_score": 0.9902149377775347,
+      "confidence_mean": 0.7068126957002078,
+      "jitter_score": 0.014677593333698155,
+      "nan_ratio": 0.0,
+      "total_frames": 100,
+      "failure_reasons": []
+    },
+    {
+      "file_path": "data\\poses\\hSAEFNf6uPI_pose.npz",
+      "video_id": "hSAEFNf6uPI",
+      "passed": true,
+      "quality_score": 0.9390499600425347,
+      "confidence_mean": 0.7810247854219662,
+      "jitter_score": 0.09142505993619805,
+      "nan_ratio": 0.0,
+      "total_frames": 1215,
+      "failure_reasons": []
+    },
+    {
+      "file_path": "data\\poses\\ky7_JdBecLk_pose.npz",
+      "video_id": "ky7_JdBecLk",
+      "passed": true,
+      "quality_score": 0.9079742001781661,
+      "confidence_mean": 0.7733413420032508,
+      "jitter_score": 0.13803869973275082,
+      "nan_ratio": 0.0,
+      "total_frames": 186,
+      "failure_reasons": []
+    },
+    {
+      "file_path": "data\\poses\\-6GLTarX_ms_pose.npz",
+      "video_id": "-6GLTarX_ms",
+      "passed": true,
+      "quality_score": 0.9244049778565784,
+      "confidence_mean": 0.7657099268949107,
+      "jitter_score": 0.11339253321513247,
+      "nan_ratio": 0.0,
+      "total_frames": 885,
+      "failure_reasons": []
+    }
+  ],
+  "failed_files": []
+}
