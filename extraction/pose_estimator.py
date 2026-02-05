@@ -346,6 +346,138 @@ class MediaPipePoseEstimator:
         
         return sequence
     
+    def visualize_frame(
+        self,
+        frame: np.ndarray,
+        frame_pose: FramePose,
+        draw_body: bool = True,
+        draw_hands: bool = True,
+    ) -> np.ndarray:
+        """
+        프레임에 포즈 시각화
+        
+        Args:
+            frame: 원본 프레임 (BGR)
+            frame_pose: 포즈 데이터
+            draw_body: 신체 포즈 그리기 여부
+            draw_hands: 손 포즈 그리기 여부
+        
+        Returns:
+            시각화된 프레임
+        """
+        vis_frame = frame.copy()
+        h, w = vis_frame.shape[:2]
+        
+        # 신체 포즈 그리기
+        if draw_body and frame_pose.body_landmarks:
+            self._draw_pose_landmarks(
+                vis_frame,
+                frame_pose.body_landmarks,
+                self.mp_pose.POSE_CONNECTIONS
+            )
+        
+        # 왼손 그리기
+        if draw_hands and frame_pose.left_hand_landmarks:
+            self._draw_hand(
+                vis_frame,
+                frame_pose.left_hand_landmarks,
+                (0, 255, 0)  # 녹색
+            )
+        
+        # 오른손 그리기
+        if draw_hands and frame_pose.right_hand_landmarks:
+            self._draw_hand(
+                vis_frame,
+                frame_pose.right_hand_landmarks,
+                (255, 0, 0)  # 파란색
+            )
+        
+        return vis_frame
+    
+    def _draw_pose_landmarks(
+        self,
+        image: np.ndarray,
+        landmarks: List[PoseLandmark],
+        connections
+    ):
+        """신체 랜드마크 그리기"""
+        h, w = image.shape[:2]
+        
+        # 연결선 그리기
+        for connection in connections:
+            start_idx, end_idx = connection
+            
+            if start_idx >= len(landmarks) or end_idx >= len(landmarks):
+                continue
+            
+            start_lm = landmarks[start_idx]
+            end_lm = landmarks[end_idx]
+            
+            # 가시성 체크
+            if start_lm.visibility < 0.5 or end_lm.visibility < 0.5:
+                continue
+            
+            start_point = (int(start_lm.x * w), int(start_lm.y * h))
+            end_point = (int(end_lm.x * w), int(end_lm.y * h))
+            
+            cv2.line(image, start_point, end_point, (255, 255, 255), 2)
+        
+        # 관절점 그리기
+        for lm in landmarks:
+            if lm.visibility < 0.5:
+                continue
+            
+            point = (int(lm.x * w), int(lm.y * h))
+            cv2.circle(image, point, 3, (0, 0, 255), -1)
+    
+    def _draw_hand(
+        self,
+        image: np.ndarray,
+        hand_landmarks: List[PoseLandmark],
+        color: tuple
+    ):
+        """손 랜드마크 그리기"""
+        h, w = image.shape[:2]
+        
+        # 연결선
+        connections = self.mp_hands.HAND_CONNECTIONS
+        
+        for connection in connections:
+            start_idx, end_idx = connection
+            
+            start_lm = hand_landmarks[start_idx]
+            end_lm = hand_landmarks[end_idx]
+            
+            start_point = (int(start_lm.x * w), int(start_lm.y * h))
+            end_point = (int(end_lm.x * w), int(end_lm.y * h))
+            
+            cv2.line(image, start_point, end_point, color, 2)
+        
+        # 관절점
+        for lm in hand_landmarks:
+            point = (int(lm.x * w), int(lm.y * h))
+            cv2.circle(image, point, 3, color, -1)
+    
+    def save_sequence(self, sequence: 'VideoPoseSequence', output_path: str):
+        """포즈 시퀀스를 파일로 저장 (.npz)"""
+        data = sequence.get_as_numpy()
+        
+        np.savez_compressed(
+            output_path,
+            video_path=sequence.video_path,
+            fps=sequence.fps,
+            total_frames=sequence.total_frames,
+            **data
+        )
+        
+        logger.info(f"Saved pose sequence to {output_path}")
+    
+    @staticmethod
+    def load_sequence(filepath: str) -> Dict[str, np.ndarray]:
+        """저장된 포즈 시퀀스 로드"""
+        data = np.load(filepath, allow_pickle=True)
+        return dict(data)
+    
     def close(self):
         """리소스 해제"""
         if self.pose:
