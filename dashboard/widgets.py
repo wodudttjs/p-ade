@@ -97,6 +97,10 @@ class StatusBar(QWidget):
             self.status_dot.setStyleSheet(f"color: {Colors.ERROR}; font-size: 14px;")
             self.status_text.setText(message or "Disconnected")
     
+    def setConnected(self, connected: bool):
+        """연결 상태 설정 (setStatus 호환)"""
+        self.setStatus(connected)
+    
     def setTimestamp(self, timestamp: str):
         """타임스탬프 업데이트"""
         self.timestamp.setText(f"Last updated: {timestamp}")

@@ -46,10 +46,18 @@ class DataService:
         try:
             from config.settings import Config
             config = Config()
-            return config.DATABASE_URL
+            # PostgreSQL 연결 테스트
+            db_url = config.DATABASE_URL
+            test_engine = create_engine(db_url)
+            with test_engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            return db_url
         except Exception:
-            # 기본값 (SQLite)
-            return "sqlite:///data/pade.db"
+            # PostgreSQL 실패 시 SQLite fallback
+            import os
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sqlite_path = os.path.join(base_dir, "data", "pade.db")
+            return f"sqlite:///{sqlite_path}"
     
     def _get_engine(self):
         """SQLAlchemy 엔진 (lazy loading)"""
@@ -281,14 +289,28 @@ class DataService:
                 failed = total_episodes - passed
                 pass_rate = passed / max(total_episodes, 1)
                 
-                # 통계
+                # 통계 (SQLite 호환 - stddev, percentile_cont 사용 안 함)
                 stats = session.query(
                     func.avg(Episode.confidence_score).label("conf_mean"),
-                    func.stddev(Episode.confidence_score).label("conf_std"),
                     func.avg(Episode.jittering_score).label("jitter_mean"),
-                    func.percentile_cont(0.95).within_group(Episode.jittering_score).label("jitter_p95"),
                     func.avg(Episode.duration_frames).label("length_mean"),
                 ).first()
+                
+                # stddev 대신 수동 계산 (SQLite 호환)
+                conf_std = 0.0
+                jitter_p95 = 0.0
+                try:
+                    all_conf = [e.confidence_score for e in session.query(Episode.confidence_score).all() if e.confidence_score]
+                    if all_conf:
+                        import statistics
+                        conf_std = statistics.stdev(all_conf) if len(all_conf) > 1 else 0.0
+                    
+                    all_jitter = sorted([e.jittering_score for e in session.query(Episode.jittering_score).all() if e.jittering_score])
+                    if all_jitter:
+                        idx = int(len(all_jitter) * 0.95)
+                        jitter_p95 = all_jitter[min(idx, len(all_jitter) - 1)]
+                except Exception:
+                    pass
                 
                 return QualityStats(
                     total_episodes=total_episodes,
@@ -296,9 +318,9 @@ class DataService:
                     failed=failed,
                     pass_rate=pass_rate,
                     confidence_mean=stats.conf_mean or 0.0,
-                    confidence_std=stats.conf_std or 0.0,
+                    confidence_std=conf_std,
                     jitter_mean=stats.jitter_mean or 0.0,
-                    jitter_p95=stats.jitter_p95 or 0.0,
+                    jitter_p95=jitter_p95,
                     episode_length_mean=stats.length_mean or 0.0,
                 )
             finally:
