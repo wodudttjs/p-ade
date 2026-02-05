@@ -14,7 +14,7 @@ opencv-python==4.8.1.78
 ffmpeg-python==0.2.0
 
 # AI/ML - Pose & Object Detection
-mediapipe==0.10.9
+mediapipe==0.10.14
 ultralytics==8.1.0  # YOLOv8
 torch==2.1.2
 torchvision==0.16.2
@@ -23,7 +23,8 @@ torchvision==0.16.2
 numpy==1.26.2
 pandas==2.1.4
 pyarrow==14.0.2
-scipy==1.11.4
+scipy==1.17.0
+h5py==3.15.1  # HDF5 file format for pose data
 
 # Database
 sqlalchemy==2.0.23
