@@ -16,6 +16,7 @@ from dashboard.widgets import (
 )
 from dashboard.pages import OverviewPage, JobsPage, QualityPage, SettingsPage
 from dashboard.app import DashboardApp, run_dashboard
+from dashboard.data_service import DataService, get_data_service
 
 __all__ = [
     # Models
@@ -31,4 +32,6 @@ __all__ = [
     "OverviewPage", "JobsPage", "QualityPage", "SettingsPage",
     # App
     "DashboardApp", "run_dashboard",
+    # Data Service
+    "DataService", "get_data_service",
 ]

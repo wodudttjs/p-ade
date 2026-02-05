@@ -21,6 +21,13 @@ from dashboard.pages import OverviewPage, JobsPage, QualityPage, SettingsPage
 from dashboard.widgets import StatusBar
 from dashboard.styles import DARK_THEME, LIGHT_THEME, Colors
 
+# DataService import (실제 DB 연동)
+try:
+    from dashboard.data_service import get_data_service
+    HAS_DATA_SERVICE = True
+except ImportError:
+    HAS_DATA_SERVICE = False
+
 
 class SidebarButton(QPushButton):
     """사이드바 네비게이션 버튼"""
@@ -92,7 +99,7 @@ class Sidebar(QFrame):
 class DashboardApp(QMainWindow):
     """대시보드 메인 윈도우"""
     
-    def __init__(self):
+    def __init__(self, db_url: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("P-ADE Dashboard")
         self.setMinimumSize(1200, 800)
@@ -102,9 +109,27 @@ class DashboardApp(QMainWindow):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(self._on_refresh)
         
+        # DataService 초기화
+        self._data_service = None
+        self._use_real_data = False
+        if HAS_DATA_SERVICE:
+            try:
+                self._data_service = get_data_service(db_url)
+                self._use_real_data = self._data_service.is_connected()
+            except Exception:
+                pass
+        
         self._setup_ui()
         self._connect_signals()
         self._apply_theme()
+        
+        # 상태 표시
+        if self._use_real_data:
+            self.statusBar().showMessage("✓ Connected to database")
+            self.sidebar.status_bar.setConnected(True)
+        else:
+            self.statusBar().showMessage("⚠ Using mock data (DB not connected)")
+            self.sidebar.status_bar.setConnected(False)
     
     def _setup_ui(self):
         """UI 구성"""
@@ -167,14 +192,20 @@ class DashboardApp(QMainWindow):
         # 스택 위젯
         self.stack = QStackedWidget()
         
-        # 데이터 모델
-        self.jobs_model = JobsTableModel()
-        self.jobs_model.replaceAll(make_mock_jobs())
+        # 데이터 로드
+        if self._use_real_data and self._data_service:
+            # 실제 DB에서 jobs 로드
+            jobs = self._data_service.get_jobs(limit=100)
+        else:
+            jobs = make_mock_jobs()
         
-        # 페이지들
-        self.overview_page = OverviewPage()
+        self.jobs_model = JobsTableModel()
+        self.jobs_model.replaceAll(jobs)
+        
+        # 페이지들 (DataService 주입)
+        self.overview_page = OverviewPage(data_service=self._data_service)
         self.jobs_page = JobsPage(self.jobs_model)
-        self.quality_page = QualityPage()
+        self.quality_page = QualityPage(data_service=self._data_service)
         self.settings_page = SettingsPage()
         
         self.stack.addWidget(self.overview_page)

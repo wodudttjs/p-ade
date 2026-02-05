@@ -19,6 +19,13 @@ from dashboard.models import (
     STAGES, STATUSES, JobRow,
     make_mock_kpi, make_mock_quality, make_mock_system
 )
+
+# DataService import (실제 DB 연동)
+try:
+    from dashboard.data_service import get_data_service, DataService
+    HAS_DATA_SERVICE = True
+except ImportError:
+    HAS_DATA_SERVICE = False
 from dashboard.table_models import JobsTableModel
 from dashboard.widgets import (
     KPICard, ProgressCard, ResourceMeter, 
@@ -30,8 +37,10 @@ from dashboard.styles import Colors
 class OverviewPage(QWidget):
     """Overview 페이지"""
     
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, data_service: Optional['DataService'] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._data_service = data_service
+        self._use_real_data = data_service is not None and data_service.is_connected()
         self._setup_ui()
         self._load_data()
     
@@ -157,9 +166,14 @@ class OverviewPage(QWidget):
     
     def refresh(self):
         """데이터 새로고침"""
-        kpi = make_mock_kpi()
-        quality = make_mock_quality()
-        system = make_mock_system()
+        if self._use_real_data and self._data_service:
+            kpi = self._data_service.get_kpi()
+            quality = self._data_service.get_quality_stats()
+            system = self._data_service.get_system_stats()
+        else:
+            kpi = make_mock_kpi()
+            quality = make_mock_quality()
+            system = make_mock_system()
         
         # KPI 업데이트
         self.kpi_cards["total_videos"].setValue(str(kpi.total_videos))
@@ -425,8 +439,10 @@ class JobsPage(QWidget):
 class QualityPage(QWidget):
     """Quality 페이지"""
     
-    def __init__(self, parent: Optional[QWidget] = None):
+    def __init__(self, data_service: Optional['DataService'] = None, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self._data_service = data_service
+        self._use_real_data = data_service is not None
         self._setup_ui()
     
     def _setup_ui(self):
@@ -499,7 +515,10 @@ class QualityPage(QWidget):
     
     def refresh(self):
         """데이터 새로고침"""
-        quality = make_mock_quality()
+        if self._use_real_data and self._data_service:
+            quality = self._data_service.get_quality_stats()
+        else:
+            quality = make_mock_quality()
         
         self.quality_labels["total"].setText(str(quality.total_episodes))
         self.quality_labels["passed"].setText(str(quality.passed))
