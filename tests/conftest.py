@@ -17,9 +17,9 @@ os.environ["DATABASE_URL"] = "sqlite:///:memory:"
 from models.database import Base
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def test_db():
-    """테스트용 인메모리 데이터베이스"""
+    """테스트용 인메모리 데이터베이스 (각 테스트마다 새로 생성)"""
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
