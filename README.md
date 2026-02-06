@@ -38,6 +38,28 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # 패키지 설치
 pip install -r requirements.txt
+
+# (객체 검출 사용 시) YOLO 의존성
+pip install ultralytics
+
+# (선택) ffmpeg 설치 후 PATH 등록
+# Windows: https://ffmpeg.org/download.html
+```
+
+### 환경설정
+
+```bash
+# DB (SQLite 기본 경로 사용 시 생략 가능)
+set P_ADE_DB_PATH=path\to\pade.db
+
+# S3 업로드
+set AWS_ACCESS_KEY_ID=...
+set AWS_SECRET_ACCESS_KEY=...
+set AWS_REGION=ap-northeast-2
+set AWS_S3_BUCKET=p-ade-datasets
+
+# (선택) Redis 큐
+set REDIS_URL=redis://localhost:6379/0
 ```
 
 ### MVP Phase 1 실행
@@ -66,7 +88,7 @@ python cleanup_robot_arm_data.py --apply
 
 - ✅ 100개 비디오 URL 수집
 - ✅ 비디오 다운로드 및 저장
-- ✅ MediaPipe로 포즈 데이터 추출
+- ✅ 로봇팔 객체 검출 및 episodes 저장
 - ✅ AWS S3 업로드
 
 ## 🛠️ 기술 스택
