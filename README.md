@@ -52,6 +52,10 @@ pip install ultralytics
 # DB (SQLite 기본 경로 사용 시 생략 가능)
 set P_ADE_DB_PATH=path\to\pade.db
 
+# (공유 DB 사용 시) 네트워크 공유 경로
+# 예: \\호스트이름\pade-db\pade.db
+# set P_ADE_DB_PATH=\\HOSTNAME\pade-db\pade.db
+
 # S3 업로드
 set AWS_ACCESS_KEY_ID=...
 set AWS_SECRET_ACCESS_KEY=...
@@ -60,6 +64,17 @@ set AWS_S3_BUCKET=p-ade-datasets
 
 # (선택) Redis 큐
 set REDIS_URL=redis://localhost:6379/0
+```
+
+### 공유 DB 설정 (팀 협업)
+
+- 공유 이름: pade-db
+- 공유 경로: \\HOSTNAME\pade-db
+- 실제 DB 파일: \\HOSTNAME\pade-db\pade.db
+
+```bash
+# 공유 DB 사용
+set P_ADE_DB_PATH=\\HOSTNAME\pade-db\pade.db
 ```
 
 ### MVP Phase 1 실행
