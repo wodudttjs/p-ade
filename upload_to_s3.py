@@ -5,9 +5,10 @@ P-ADE S3 업로드 스크립트
 포즈 데이터(.npz)와 에피소드를 S3에 업로드합니다.
 
 Usage:
-    python upload_to_s3.py --all                    # 모든 포즈 파일 업로드
+    python upload_to_s3.py --all                      # 모든 포즈 파일 업로드
     python upload_to_s3.py --file data/poses/xxx.npz  # 특정 파일 업로드
-    python upload_to_s3.py --dry-run --all          # 업로드할 파일 미리보기
+    python upload_to_s3.py --input data/episodes/     # 특정 디렉토리 업로드
+    python upload_to_s3.py --dry-run --all            # 업로드할 파일 미리보기
 """
 
 import os
@@ -62,7 +63,7 @@ def generate_s3_key(local_path: Path, prefix: str = "poses") -> str:
     return f"{prefix}/{date_prefix}/{local_path.name}"
 
 
-def get_file_metadata(local_path: Path) -> Dict[str, str]:
+def get_file_metadata(local_path: Path, data_type: str = "pose") -> Dict[str, str]:
     """파일 메타데이터 생성"""
     stat = local_path.stat()
     return {
@@ -70,7 +71,7 @@ def get_file_metadata(local_path: Path) -> Dict[str, str]:
         "upload_timestamp": datetime.now().isoformat(),
         "file_size": str(stat.st_size),
         "project": "p-ade",
-        "data_type": "pose",
+        "data_type": data_type,
     }
 
 
@@ -79,6 +80,8 @@ def upload_file(
     local_path: Path,
     bucket: str,
     dry_run: bool = False,
+    prefix: str = "poses",
+    data_type: str = "pose",
 ) -> Dict:
     """단일 파일 업로드"""
     # 파일 존재 확인
@@ -90,8 +93,8 @@ def upload_file(
             "error": f"File not found: {local_path}",
         }
     
-    s3_key = generate_s3_key(local_path)
-    metadata = get_file_metadata(local_path)
+    s3_key = generate_s3_key(local_path, prefix=prefix)
+    metadata = get_file_metadata(local_path, data_type=data_type)
     file_size = local_path.stat().st_size
     
     result = {
@@ -138,31 +141,123 @@ def upload_file(
     return result
 
 
+def _parse_episode_ids(file_path: Path) -> Dict[str, str]:
+    stem = file_path.stem
+    base = stem[:-5] if stem.endswith("_pose") else stem
+    if "_ep" in base:
+        video_id = base.split("_ep")[0]
+        episode_id = base
+    else:
+        video_id = base
+        episode_id = f"{base}_ep001"
+    return {"video_id": video_id, "episode_id": episode_id}
+
+
+def register_episodes_in_db(files: List[Path]):
+    """episodes 파일을 DB에 등록 (local_path, filesize 업데이트)"""
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from models.database import Base, Video, Episode
+    except Exception as e:
+        logger.warning(f"DB 모듈 로드 실패, 등록 스킵: {e}")
+        return
+
+    db_path = project_root / "data" / "pade.db"
+    if not db_path.exists():
+        logger.warning("DB 파일 없음, 등록 스킵")
+        return
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        for file_path in files:
+            ids = _parse_episode_ids(file_path)
+            video = session.query(Video).filter_by(video_id=ids["video_id"]).first()
+            if not video:
+                video = Video(
+                    video_id=ids["video_id"],
+                    platform="youtube",
+                    url="",
+                    status="processed",
+                )
+                session.add(video)
+                session.flush()
+
+            episode = session.query(Episode).filter_by(episode_id=ids["episode_id"]).first()
+            if not episode:
+                episode = Episode(
+                    episode_id=ids["episode_id"],
+                    video_id=video.id,
+                )
+                session.add(episode)
+
+            episode.local_path = str(file_path)
+            if file_path.exists():
+                episode.filesize_bytes = file_path.stat().st_size
+
+        session.commit()
+    finally:
+        session.close()
+
+
 def update_database(results: List[Dict]):
     """업로드 결과를 DB에 반영"""
-    import sqlite3
-    
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from models.database import Base, Video, Episode
+    except Exception as e:
+        logger.warning(f"DB 모듈 로드 실패, 업데이트 스킵: {e}")
+        return
+
     db_path = project_root / "data" / "pade.db"
     if not db_path.exists():
         logger.warning("DB 파일 없음, 업데이트 스킵")
         return
-        
-    conn = sqlite3.connect(str(db_path))
-    cursor = conn.cursor()
-    
+
+    engine = create_engine(f"sqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
     updated = 0
-    for result in results:
-        if result.get("status") in ["completed", "skipped"]:
-            # 에피소드 테이블의 cloud_path 업데이트
-            video_id = result["local_path"].split("/")[-1].replace("_pose.npz", "")
-            cursor.execute(
-                "UPDATE episodes SET cloud_path = ?, uploaded_at = ? WHERE video_id IN (SELECT id FROM videos WHERE video_id = ?)",
-                (result.get("uri"), datetime.now().isoformat(), video_id)
-            )
-            updated += cursor.rowcount
-            
-    conn.commit()
-    conn.close()
+    try:
+        for result in results:
+            if result.get("status") in ["completed", "skipped"]:
+                file_path = Path(result["local_path"])
+                ids = _parse_episode_ids(file_path)
+
+                video = session.query(Video).filter_by(video_id=ids["video_id"]).first()
+                if not video:
+                    video = Video(
+                        video_id=ids["video_id"],
+                        platform="youtube",
+                        url="",
+                        status="processed",
+                    )
+                    session.add(video)
+                    session.flush()
+
+                episode = session.query(Episode).filter_by(episode_id=ids["episode_id"]).first()
+                if not episode:
+                    episode = Episode(
+                        episode_id=ids["episode_id"],
+                        video_id=video.id,
+                    )
+                    session.add(episode)
+
+                episode.cloud_path = result.get("uri")
+                episode.uploaded_at = datetime.now()
+                updated += 1
+
+        session.commit()
+    finally:
+        session.close()
+
     logger.info(f"📝 DB 업데이트: {updated}개 에피소드")
 
 
@@ -170,29 +265,56 @@ def main():
     parser = argparse.ArgumentParser(description="P-ADE S3 업로드")
     parser.add_argument("--all", action="store_true", help="모든 포즈 파일 업로드")
     parser.add_argument("--file", type=str, help="특정 파일 업로드")
+    parser.add_argument("--input", type=str, help="파일 또는 디렉토리 업로드")
     parser.add_argument("--dry-run", action="store_true", help="실제 업로드 없이 미리보기")
     parser.add_argument("--bucket", type=str, help="S3 버킷 이름 (기본: 환경변수)")
     parser.add_argument("--no-db-update", action="store_true", help="DB 업데이트 스킵")
+    parser.add_argument("--prefix", type=str, help="S3 키 접두어 (기본: 입력 폴더명)")
     
     args = parser.parse_args()
     
-    if not args.all and not args.file:
+    if not args.all and not args.file and not args.input:
         parser.print_help()
-        print("\n❌ --all 또는 --file 옵션을 지정해주세요.")
+        print("\n❌ --all, --file 또는 --input 옵션을 지정해주세요.")
         sys.exit(1)
         
     # 파일 목록 수집
+    prefix = "poses"
+    data_type = "pose"
+
     if args.all:
         files = find_pose_files()
         if not files:
             print("📁 업로드할 포즈 파일이 없습니다.")
             sys.exit(0)
+    elif args.input:
+        input_path = Path(args.input)
+        if not input_path.exists():
+            print(f"❌ 경로 없음: {args.input}")
+            sys.exit(1)
+        if input_path.is_file():
+            files = [input_path]
+        else:
+            files = [p for p in input_path.rglob("*") if p.is_file()]
+        if not files:
+            print(f"📁 업로드할 파일이 없습니다: {args.input}")
+            sys.exit(0)
+        if args.prefix:
+            prefix = args.prefix
+        else:
+            prefix = input_path.name or "input"
+        data_type = prefix
     else:
         file_path = Path(args.file)
         if not file_path.exists():
             print(f"❌ 파일 없음: {args.file}")
             sys.exit(1)
         files = [file_path]
+        if args.prefix:
+            prefix = args.prefix
+        else:
+            prefix = file_path.parent.name if file_path.parent.name else "poses"
+        data_type = prefix
         
     # 버킷 이름
     bucket = args.bucket or get_bucket_name()
@@ -230,9 +352,19 @@ def main():
     results = []
     total_size = 0
     
+    if not args.no_db_update and data_type in ["episodes", "episode"]:
+        register_episodes_in_db(files)
+
     for i, file_path in enumerate(files, 1):
         print(f"\n[{i}/{len(files)}] {file_path.name}")
-        result = upload_file(provider, file_path, bucket, args.dry_run)
+        result = upload_file(
+            provider,
+            file_path,
+            bucket,
+            args.dry_run,
+            prefix=prefix,
+            data_type=data_type,
+        )
         results.append(result)
         total_size += result.get("size_bytes", 0)
         

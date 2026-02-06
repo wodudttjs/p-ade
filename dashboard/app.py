@@ -360,10 +360,12 @@ class DashboardApp(QMainWindow):
         
         self.db_stats_labels = {}
         db_items = [
-            ("videos", "📹 Videos:"),
+            ("videos", "📹 Collected:"),
             ("episodes", "🎬 Episodes:"),
             ("jobs", "📋 Jobs:"),
             ("storage", "💾 Storage:"),
+            ("db", "🗄️ DB:"),
+            ("s3", "☁️ S3:"),
         ]
         
         for key, label_text in db_items:
@@ -633,7 +635,15 @@ class DashboardApp(QMainWindow):
     
     def _refresh_db_stats(self):
         """DB 통계 새로고침"""
-        if not self._use_real_data or not self._data_service:
+        if not self._data_service:
+            return
+
+        if self.db_stats_labels.get("db"):
+            self.db_stats_labels["db"].setText(self._data_service.get_db_status())
+        if self.db_stats_labels.get("s3"):
+            self.db_stats_labels["s3"].setText(self._data_service.get_s3_status())
+
+        if not self._use_real_data:
             return
         
         try:
@@ -645,6 +655,13 @@ class DashboardApp(QMainWindow):
             
             # 파이프라인 진행률 계산 (파일 기반)
             self._update_pipeline_progress()
+
+            # 페이지 데이터 새로고침
+            self.overview_page.refresh()
+            self.quality_page.refresh()
+            if self.jobs_model:
+                jobs = self._data_service.get_jobs(limit=100)
+                self.jobs_model.replaceAll(jobs)
             
         except Exception as e:
             pass

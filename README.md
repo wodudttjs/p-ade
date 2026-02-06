@@ -44,16 +44,22 @@ pip install -r requirements.txt
 
 ```bash
 # 1. YouTube 크롤링
-python -m spiders.youtube_spider --keywords "robot assembly" --max-results 100
+python -m spiders.youtube_spider --keywords "robot arm pick and place" --max-results 100 --overwrite
 
-# 2. 비디오 다운로드
-python -m ingestion.downloader --input data/urls.csv
+# 2. 비디오 다운로드 (필터 포함, 최대 10개)
+python -m ingestion.downloader --input data/urls.csv --max-downloads 10
 
-# 3. 포즈 추출
-python -m extraction.pose_estimator --video data/raw/video.mp4
+# 3. 객체 검출 → episodes 저장 (로봇팔 영상 상위 10개)
+python -m extraction.detect_to_episodes --limit 10 --output-fps 5
 
-# 4. 클라우드 업로드
-python -m storage.s3_uploader --input data/processed/
+# 4. 클라우드 업로드 (episodes)
+python upload_to_s3.py --input data/episodes --prefix episodes
+
+# 5. GUI 실행
+python run_dashboard.py
+
+# (선택) 로봇팔 외 데이터 정리
+python cleanup_robot_arm_data.py --apply
 ```
 
 ## 📊 MVP Phase 1 목표

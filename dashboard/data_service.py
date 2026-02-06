@@ -66,6 +66,14 @@ class DataService:
         """DB URL 가져오기"""
         if self._db_url:
             return self._db_url
+
+        env_db_url = os.getenv("P_ADE_DB_URL") or os.getenv("DASHBOARD_DB_URL")
+        if env_db_url:
+            return env_db_url
+
+        env_db_path = os.getenv("P_ADE_DB_PATH")
+        if env_db_path:
+            return f"sqlite:///{env_db_path}"
         
         try:
             from config.settings import Config
@@ -78,7 +86,6 @@ class DataService:
             return db_url
         except Exception:
             # PostgreSQL 실패 시 SQLite fallback
-            import os
             base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             sqlite_path = os.path.join(base_dir, "data", "pade.db")
             return f"sqlite:///{sqlite_path}"
@@ -110,6 +117,37 @@ class DataService:
         except Exception as e:
             logger.warning(f"DB connection check failed: {e}")
             return False
+
+    def get_db_status(self) -> str:
+        return "connected" if self.is_connected() else "disconnected"
+    
+    def get_s3_status(self) -> str:
+        try:
+            from config.settings import Config
+            import boto3
+
+            config = Config()
+            bucket = os.getenv("AWS_S3_BUCKET", config.AWS_S3_BUCKET)
+            region = os.getenv("AWS_REGION", config.AWS_REGION)
+            access_key = os.getenv("AWS_ACCESS_KEY_ID", config.AWS_ACCESS_KEY_ID)
+            secret_key = os.getenv("AWS_SECRET_ACCESS_KEY", config.AWS_SECRET_ACCESS_KEY)
+
+            if not access_key or not secret_key:
+                return "no-credentials"
+
+            client = boto3.client(
+                "s3",
+                region_name=region,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+            )
+            client.head_bucket(Bucket=bucket)
+            return "connected"
+        except KeyboardInterrupt:
+            return "disconnected"
+        except Exception as e:
+            logger.warning(f"S3 status check failed: {e}")
+            return "disconnected"
     
     # ===== Jobs 관련 =====
     

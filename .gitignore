@@ -39,6 +39,7 @@ data/raw/*
 data/processed/*
 data/episodes/*
 !data/.gitkeep
+data/urls.csv
 *.mp4
 *.avi
 *.mov
@@ -73,3 +74,9 @@ htmlcov/
 tmp/
 temp/
 *.tmp
+
+# Local ML assets
+.mediapipe_root/
+mediapipe_resources/
+vendor/
+yolov8n.pt
