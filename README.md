@@ -42,6 +42,15 @@ pip install -r requirements.txt
 # (객체 검출 사용 시) YOLO 의존성
 pip install ultralytics
 
+# (권장) 의존성 재현 설치
+# 다른 사람이 받았을 때는 requirements.txt 기준으로 설치
+# 새로 설치할 경우 아래 순서로 진행
+pip install -r requirements.txt
+
+# GPU 사용 시 (선택)
+# torch/torchvision은 GPU 빌드가 필요할 수 있음
+# https://pytorch.org/get-started/locally/ 참고
+
 # (선택) ffmpeg 설치 후 PATH 등록
 # Windows: https://ffmpeg.org/download.html
 ```
