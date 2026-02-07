@@ -1,0 +1,92 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data
+data/raw/*
+data/processed/*
+data/episodes/*
+!data/.gitkeep
+data/urls.csv
+*.mp4
+*.avi
+*.mov
+*.npz
+*.parquet
+
+# Logs
+logs/*.log
+*.log
+
+# Database
+*.db
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Scrapy
+.scrapy/
+
+# Playwright
+playwright/.auth/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+
+# Temporary
+tmp/
+temp/
+*.tmp
+
+# Local ML assets
+.mediapipe_root/
+mediapipe_resources/
+vendor/
+yolov8n.pt
+
+# Large data files
+data/raw/*.mp4
+data/episodes/*.npz
+data/poses/*.npz
+*.db
+logs/*.log
+yolov8*.pt
+*.pt
+*.pth
