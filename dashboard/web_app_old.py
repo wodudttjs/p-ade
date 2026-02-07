@@ -29,6 +29,13 @@ from flask_cors import CORS
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+# DataService import
+try:
+    from dashboard.data_service import get_data_service
+    HAS_DATA_SERVICE = True
+except ImportError:
+    HAS_DATA_SERVICE = False
+
 # ============================================================================
 # Flask App
 # ============================================================================
@@ -63,8 +70,12 @@ settings_state = {
     "detect_confidence": 0.5,
 }
 
-# 작업 히스토리
-jobs_history = []
+data_service = None
+if HAS_DATA_SERVICE:
+    try:
+        data_service = get_data_service()
+    except Exception:
+        pass
 
 
 def get_db_connection():
@@ -162,10 +173,11 @@ def get_db_stats() -> Dict[str, Any]:
 
 
 # ============================================================================
-# HTML Template
+# HTML Template (Full Featured)
 # ============================================================================
 
-HTML_TEMPLATE = '''<!DOCTYPE html>
+HTML_TEMPLATE = """
+<!DOCTYPE html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
@@ -187,13 +199,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             --accent-red: #f85149;
             --accent-purple: #a371f7;
         }
+        
         * { margin: 0; padding: 0; box-sizing: border-box; }
+        
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             background: var(--bg-dark);
             color: var(--text-primary);
             min-height: 100vh;
         }
+        
+        /* Sidebar */
         .sidebar {
             position: fixed;
             left: 0; top: 0;
@@ -204,6 +220,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             padding: 20px 0;
             z-index: 1000;
         }
+        
         .sidebar-logo {
             padding: 0 20px 20px;
             font-size: 24px;
@@ -212,7 +229,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             border-bottom: 1px solid var(--border-color);
             margin-bottom: 20px;
         }
+        
         .sidebar-nav { list-style: none; }
+        
         .sidebar-nav li a {
             display: flex;
             align-items: center;
@@ -221,18 +240,22 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             text-decoration: none;
             transition: all 0.2s;
         }
+        
         .sidebar-nav li a:hover, .sidebar-nav li a.active {
             background: var(--bg-hover);
             color: var(--text-primary);
             border-left: 3px solid var(--accent-blue);
         }
+        
         .sidebar-nav li a i { margin-right: 12px; font-size: 18px; }
+        
         .sidebar-footer {
             position: absolute;
             bottom: 20px;
             left: 0; right: 0;
             padding: 0 20px;
         }
+        
         .db-status {
             display: flex;
             align-items: center;
@@ -242,13 +265,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             border-radius: 8px;
             font-size: 12px;
         }
+        
         .status-dot {
             width: 8px; height: 8px;
             border-radius: 50%;
             background: var(--accent-red);
         }
+        
         .status-dot.connected { background: var(--accent-green); }
+        
+        /* Main Content */
         .main-content { margin-left: 220px; min-height: 100vh; }
+        
+        /* Top Bar */
         .top-bar {
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
@@ -260,9 +289,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             top: 0;
             z-index: 100;
         }
+        
         .page-title { font-size: 20px; font-weight: 600; }
+        
         .top-actions { display: flex; gap: 10px; align-items: center; }
+        
         .last-update { color: var(--text-secondary); font-size: 13px; }
+        
         .btn-icon {
             width: 36px; height: 36px;
             border-radius: 8px;
@@ -275,25 +308,33 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             cursor: pointer;
             transition: all 0.2s;
         }
+        
         .btn-icon:hover { background: var(--bg-hover); border-color: var(--accent-blue); }
+        
+        /* Page Container */
         .page-container { display: none; }
         .page-container.active { display: block; }
+        
+        /* Control Panel */
         .control-panel {
             background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
             padding: 20px 30px;
         }
+        
         .control-grid {
             display: grid;
             grid-template-columns: 280px 1fr 220px;
             gap: 20px;
         }
+        
         .control-box {
             background: var(--bg-dark);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 16px;
         }
+        
         .control-box h4 {
             font-size: 13px;
             color: var(--text-secondary);
@@ -301,6 +342,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             text-transform: uppercase;
             letter-spacing: 0.5px;
         }
+        
+        /* Buttons */
         .btn-action {
             padding: 10px 16px;
             border: none;
@@ -312,15 +355,20 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             align-items: center;
             gap: 6px;
         }
+        
         .btn-action:hover { filter: brightness(1.1); }
         .btn-action:disabled { opacity: 0.5; cursor: not-allowed; }
+        
         .btn-primary { background: var(--accent-blue); color: #fff; }
         .btn-success { background: var(--accent-green); color: #fff; }
         .btn-danger { background: var(--accent-red); color: #fff; }
         .btn-warning { background: var(--accent-yellow); color: #000; }
         .btn-secondary { background: var(--bg-hover); color: var(--text-primary); border: 1px solid var(--border-color); }
+        
         .btn-sm { padding: 6px 12px; font-size: 12px; }
+        
         .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        
         .form-control-dark {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -329,6 +377,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             padding: 8px 12px;
             width: 100%;
         }
+        
         .form-control-dark:focus {
             background: var(--bg-card);
             border-color: var(--accent-blue);
@@ -336,58 +385,100 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
             outline: none;
         }
-        .form-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; display: block; }
+        
+        .form-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+            display: block;
+        }
+        
         .form-group { margin-bottom: 12px; }
+        
+        /* Progress Bars */
         .progress-stages {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 15px;
             margin-bottom: 20px;
         }
+        
         .stage-item { text-align: center; }
+        
         .stage-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+        
         .stage-progress {
             height: 8px;
             background: var(--bg-card);
             border-radius: 4px;
             overflow: hidden;
         }
+        
         .stage-progress .bar {
             height: 100%;
             border-radius: 4px;
             transition: width 0.3s ease;
         }
+        
         .stage-progress .bar.crawl { background: var(--accent-blue); }
         .stage-progress .bar.download { background: var(--accent-purple); }
         .stage-progress .bar.detect { background: var(--accent-yellow); }
         .stage-progress .bar.upload { background: var(--accent-green); }
+        
         .total-progress {
             height: 12px;
             background: var(--bg-card);
             border-radius: 6px;
             overflow: hidden;
         }
+        
         .total-progress .bar {
             height: 100%;
             background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
             border-radius: 6px;
             transition: width 0.3s ease;
         }
-        .progress-status { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
+        
+        .progress-status {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+        
         .progress-status .label { color: var(--text-secondary); }
         .progress-status .value { font-weight: 600; }
-        .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color); }
+        
+        /* Stats */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
         .stat-row:last-child { border-bottom: none; }
         .stat-label { color: var(--text-secondary); font-size: 13px; }
         .stat-value { font-weight: 600; color: var(--accent-blue); }
+        
+        /* Dashboard Content */
         .dashboard-content { padding: 30px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+        
+        /* Stats Cards */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
         .stat-card {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 20px;
         }
+        
         .stat-card .icon {
             width: 48px; height: 48px;
             border-radius: 12px;
@@ -397,33 +488,85 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 24px;
             margin-bottom: 15px;
         }
+        
         .stat-card .icon.blue { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
         .stat-card .icon.green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
         .stat-card .icon.yellow { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
         .stat-card .icon.purple { background: rgba(163, 113, 247, 0.15); color: var(--accent-purple); }
+        
         .stat-card .value { font-size: 32px; font-weight: 700; margin-bottom: 5px; }
         .stat-card .label { color: var(--text-secondary); font-size: 14px; }
-        .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 30px; }
+        
+        /* Charts Container */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
         .chart-card {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 20px;
         }
-        .chart-card h3 { font-size: 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
-        .data-table { width: 100%; border-collapse: collapse; }
-        .data-table th, .data-table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); }
-        .data-table th { background: var(--bg-dark); color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+        
+        .chart-card h3 {
+            font-size: 16px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        /* Table */
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .data-table th, .data-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .data-table th {
+            background: var(--bg-dark);
+            color: var(--text-secondary);
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        
         .data-table tr:hover { background: var(--bg-hover); }
-        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+        
         .badge-success { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
         .badge-warning { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
         .badge-danger { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
         .badge-info { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
         .badge-secondary { background: rgba(139, 148, 158, 0.2); color: var(--text-secondary); }
+        
+        /* Activity */
         .activity-list { max-height: 300px; overflow-y: auto; }
-        .activity-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-color); }
+        
+        .activity-item {
+            display: flex;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
         .activity-item:last-child { border-bottom: none; }
+        
         .activity-icon {
             width: 32px; height: 32px;
             border-radius: 8px;
@@ -433,15 +576,26 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 14px;
             flex-shrink: 0;
         }
+        
         .activity-icon.success { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
         .activity-icon.info { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
         .activity-icon.warning { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
         .activity-icon.error { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); }
+        
         .activity-content { flex: 1; }
         .activity-title { font-size: 13px; margin-bottom: 2px; }
         .activity-time { font-size: 11px; color: var(--text-secondary); }
-        .log-panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
+        
+        /* Log Panel */
+        .log-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
         .log-panel h3 { font-size: 16px; margin-bottom: 15px; }
+        
         .log-content {
             background: var(--bg-dark);
             border-radius: 8px;
@@ -452,29 +606,48 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             font-size: 12px;
             line-height: 1.6;
         }
+        
         .log-line { margin-bottom: 4px; }
         .log-line.info { color: var(--accent-blue); }
         .log-line.success { color: var(--accent-green); }
         .log-line.warning { color: var(--accent-yellow); }
         .log-line.error { color: var(--accent-red); }
-        .settings-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+        
+        /* Settings Form */
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 20px;
+        }
+        
         .settings-section {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
             border-radius: 12px;
             padding: 20px;
         }
-        .settings-section h3 { font-size: 16px; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color); }
+        
+        .settings-section h3 {
+            font-size: 16px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        /* Modal */
         .modal-overlay {
             position: fixed;
             top: 0; left: 0; right: 0; bottom: 0;
             background: rgba(0, 0, 0, 0.7);
-            display: none;
+            display: flex;
             align-items: center;
             justify-content: center;
             z-index: 2000;
+            display: none;
         }
+        
         .modal-overlay.active { display: flex; }
+        
         .modal-content {
             background: var(--bg-card);
             border: 1px solid var(--border-color);
@@ -483,14 +656,31 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             max-width: 500px;
             width: 90%;
         }
-        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
         .modal-title { font-size: 18px; font-weight: 600; }
-        .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; }
+        
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 24px;
+            cursor: pointer;
+        }
+        
+        /* Responsive */
         @media (max-width: 1200px) {
             .stats-grid, .settings-grid { grid-template-columns: repeat(2, 1fr); }
             .charts-grid { grid-template-columns: 1fr; }
             .control-grid { grid-template-columns: 1fr; }
         }
+        
         @media (max-width: 768px) {
             .sidebar { transform: translateX(-100%); }
             .main-content { margin-left: 0; }
@@ -500,6 +690,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </style>
 </head>
 <body>
+    <!-- Sidebar -->
     <aside class="sidebar">
         <div class="sidebar-logo">🎬 P-ADE</div>
         <ul class="sidebar-nav">
@@ -519,7 +710,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
     </aside>
     
+    <!-- Main Content -->
     <main class="main-content">
+        <!-- Top Bar -->
         <header class="top-bar">
             <h1 class="page-title" id="page-title">Overview</h1>
             <div class="top-actions">
@@ -530,8 +723,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         <!-- Overview Page -->
         <div class="page-container active" id="page-overview">
+            <!-- Control Panel -->
             <section class="control-panel">
                 <div class="control-grid">
+                    <!-- Pipeline Control -->
                     <div class="control-box">
                         <h4>Pipeline Control</h4>
                         <div class="form-group">
@@ -554,6 +749,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         </div>
                     </div>
                     
+                    <!-- Progress -->
                     <div class="control-box">
                         <h4>Pipeline Progress</h4>
                         <div class="progress-stages">
@@ -581,6 +777,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         </div>
                     </div>
                     
+                    <!-- Database Stats -->
                     <div class="control-box">
                         <h4>Database Stats</h4>
                         <div class="stat-row"><span class="stat-label">📹 Videos</span><span class="stat-value" id="stat-videos">—</span></div>
@@ -591,6 +788,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 </div>
             </section>
             
+            <!-- Dashboard Content -->
             <section class="dashboard-content">
                 <div class="stats-grid">
                     <div class="stat-card">
@@ -673,7 +871,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     </h3>
                     <table class="data-table" id="jobs-table">
                         <thead>
-                            <tr><th>Job ID</th><th>Stage</th><th>Status</th><th>Started</th><th>Progress</th><th>Actions</th></tr>
+                            <tr>
+                                <th>Job ID</th>
+                                <th>Stage</th>
+                                <th>Status</th>
+                                <th>Started</th>
+                                <th>Progress</th>
+                                <th>Actions</th>
+                            </tr>
                         </thead>
                         <tbody id="jobs-tbody"></tbody>
                     </table>
@@ -702,7 +907,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>ID</th><th>Title</th><th>Duration</th><th>Status</th><th>Size</th><th>Actions</th></tr>
+                            <tr>
+                                <th>ID</th>
+                                <th>Title</th>
+                                <th>Duration</th>
+                                <th>Status</th>
+                                <th>Size</th>
+                                <th>Actions</th>
+                            </tr>
                         </thead>
                         <tbody id="videos-tbody"></tbody>
                     </table>
@@ -722,7 +934,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>Filename</th><th>Video ID</th><th>Size</th><th>Created</th><th>Actions</th></tr>
+                            <tr>
+                                <th>Filename</th>
+                                <th>Video ID</th>
+                                <th>Size</th>
+                                <th>Created</th>
+                                <th>Actions</th>
+                            </tr>
                         </thead>
                         <tbody id="episodes-tbody"></tbody>
                     </table>
@@ -740,7 +958,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <div class="label">Quality Passed</div>
                     </div>
                     <div class="stat-card">
-                        <div class="icon purple"><i class="bi bi-x-circle"></i></div>
+                        <div class="icon red"><i class="bi bi-x-circle"></i></div>
                         <div class="value" id="quality-failed">0</div>
                         <div class="label">Quality Failed</div>
                     </div>
@@ -843,6 +1061,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
     </main>
     
+    <!-- Modal -->
     <div class="modal-overlay" id="modal">
         <div class="modal-content">
             <div class="modal-header">
@@ -864,17 +1083,20 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         let currentPage = 'overview';
         let modalCallback = null;
         
+        // Initialize
         document.addEventListener('DOMContentLoaded', () => {
             refreshData();
             startAutoRefresh();
             setupNavigation();
         });
         
+        // Navigation
         function setupNavigation() {
             document.querySelectorAll('.sidebar-nav a').forEach(link => {
                 link.addEventListener('click', (e) => {
                     e.preventDefault();
-                    navigateTo(link.dataset.page);
+                    const page = link.dataset.page;
+                    navigateTo(page);
                 });
             });
         }
@@ -887,6 +1109,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById(`page-${page}`).classList.add('active');
             document.getElementById('page-title').textContent = page.charAt(0).toUpperCase() + page.slice(1);
             
+            // Load page-specific data
             if (page === 'jobs') refreshJobs();
             else if (page === 'videos') loadVideos();
             else if (page === 'episodes') loadEpisodes();
@@ -894,21 +1117,25 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             else if (page === 'settings') loadSettings();
         }
         
+        // Auto Refresh
         function startAutoRefresh() {
             refreshInterval = setInterval(() => {
                 if (currentPage === 'overview') refreshData();
             }, 5000);
         }
         
+        // Refresh Data
         async function refreshData() {
             try {
                 const [statsRes, pipelineRes] = await Promise.all([
                     fetch(`${API_BASE}/api/stats`),
                     fetch(`${API_BASE}/api/pipeline/status`)
                 ]);
+                
                 const stats = await statsRes.json();
                 const pipeline = await pipelineRes.json();
                 
+                // Update DB status
                 const statusDot = document.getElementById('db-status-dot');
                 const statusText = document.getElementById('db-status-text');
                 if (stats.db.connected) {
@@ -919,26 +1146,32 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     statusText.textContent = 'DB Disconnected';
                 }
                 
+                // Update stats
                 document.getElementById('stat-videos').textContent = stats.files.raw_videos;
                 document.getElementById('stat-episodes').textContent = stats.files.episodes;
                 document.getElementById('stat-uploaded').textContent = stats.files.uploaded || 0;
                 document.getElementById('stat-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
                 
+                // Update cards
                 document.getElementById('card-videos').textContent = stats.files.raw_videos;
                 document.getElementById('card-episodes').textContent = stats.files.episodes;
                 document.getElementById('card-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
                 document.getElementById('card-uploaded').textContent = stats.files.uploaded || 0;
                 
+                // Update chart bars
                 const maxVal = Math.max(stats.files.raw_videos, stats.files.poses, stats.files.episodes, stats.files.uploaded || 1, 1);
                 document.getElementById('chart-bar-videos').style.height = `${(stats.files.raw_videos / maxVal) * 180}px`;
                 document.getElementById('chart-bar-poses').style.height = `${(stats.files.poses / maxVal) * 180}px`;
                 document.getElementById('chart-bar-episodes').style.height = `${(stats.files.episodes / maxVal) * 180}px`;
                 document.getElementById('chart-bar-uploaded').style.height = `${((stats.files.uploaded || 0) / maxVal) * 180}px`;
                 
+                // Update timestamp
                 document.getElementById('last-update').textContent = `Last update: ${new Date().toLocaleTimeString()}`;
                 
+                // Update pipeline UI
                 isRunning = pipeline.is_running;
                 updatePipelineUI(pipeline);
+                
             } catch (error) {
                 console.error('Error refreshing data:', error);
             }
@@ -957,9 +1190,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('progress-total').style.width = `${total}%`;
             
             let status = 'Ready';
-            if (pipeline.is_running) status = `Running: ${pipeline.current_stage || 'Initializing...'}`;
-            else if (total > 0 && total < 100) status = 'Paused';
-            else if (total >= 100) status = 'Completed';
+            if (pipeline.is_running) {
+                status = `Running: ${pipeline.current_stage || 'Initializing...'}`;
+            } else if (total > 0 && total < 100) {
+                status = 'Paused';
+            } else if (total >= 100) {
+                status = 'Completed';
+            }
             document.getElementById('pipeline-status').textContent = status;
             
             if (pipeline.logs && pipeline.logs.length > 0) {
@@ -982,18 +1219,27 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             return div.innerHTML;
         }
         
+        // Pipeline Control
         async function startPipeline(stage) {
             const target = document.getElementById('target-count').value;
+            
             try {
                 addActivity('info', `Starting pipeline: ${stage}...`);
+                
                 const res = await fetch(`${API_BASE}/api/pipeline/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target_count: parseInt(target), stage: stage })
                 });
+                
                 const result = await res.json();
-                if (result.success) addActivity('success', `Pipeline ${stage} started`);
-                else addActivity('warning', `Failed: ${result.message}`);
+                
+                if (result.success) {
+                    addActivity('success', `Pipeline ${stage} started`);
+                } else {
+                    addActivity('warning', `Failed: ${result.message}`);
+                }
+                
                 refreshData();
             } catch (error) {
                 console.error('Error starting pipeline:', error);
@@ -1004,24 +1250,32 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         async function stopPipeline() {
             try {
                 addActivity('warning', 'Stopping pipeline...');
+                
                 const res = await fetch(`${API_BASE}/api/pipeline/stop`, { method: 'POST' });
                 const result = await res.json();
-                if (result.success) addActivity('info', 'Pipeline stopped');
+                
+                if (result.success) {
+                    addActivity('info', 'Pipeline stopped');
+                }
+                
                 refreshData();
             } catch (error) {
                 console.error('Error stopping pipeline:', error);
             }
         }
         
+        // Jobs
         async function refreshJobs() {
             try {
                 const res = await fetch(`${API_BASE}/api/jobs`);
                 const jobs = await res.json();
+                
                 const tbody = document.getElementById('jobs-tbody');
                 if (jobs.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No jobs found</td></tr>';
                     return;
                 }
+                
                 tbody.innerHTML = jobs.map(job => `
                     <tr>
                         <td>${job.id}</td>
@@ -1029,7 +1283,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td><span class="badge badge-${job.status === 'completed' ? 'success' : job.status === 'running' ? 'info' : job.status === 'failed' ? 'danger' : 'secondary'}">${job.status}</span></td>
                         <td>${job.started_at || '—'}</td>
                         <td>${job.progress}%</td>
-                        <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">Logs</button></td>
+                        <td>
+                            <button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">Logs</button>
+                        </td>
                     </tr>
                 `).join('');
             } catch (error) {
@@ -1041,16 +1297,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             showModal('Job Logs', `<div class="log-content" style="max-height: 300px;">Loading logs for job ${jobId}...</div>`);
         }
         
+        // Videos
         async function loadVideos() {
             try {
                 const filter = document.getElementById('video-filter').value;
                 const res = await fetch(`${API_BASE}/api/videos?status=${filter}`);
                 const data = await res.json();
+                
                 const tbody = document.getElementById('videos-tbody');
                 if (data.videos.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No videos found</td></tr>';
                     return;
                 }
+                
                 tbody.innerHTML = data.videos.map(v => `
                     <tr>
                         <td>${v.id}</td>
@@ -1058,9 +1317,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td>${v.duration || '—'}</td>
                         <td><span class="badge badge-${v.status === 'uploaded' ? 'success' : v.status === 'downloaded' ? 'info' : v.status === 'failed' ? 'danger' : 'secondary'}">${v.status}</span></td>
                         <td>${v.size_mb ? v.size_mb.toFixed(1) + ' MB' : '—'}</td>
-                        <td><button class="btn-action btn-sm btn-danger" onclick="deleteVideo(${v.id})"><i class="bi bi-trash"></i></button></td>
+                        <td>
+                            <button class="btn-action btn-sm btn-danger" onclick="deleteVideo(${v.id})"><i class="bi bi-trash"></i></button>
+                        </td>
                     </tr>
                 `).join('');
+                
                 document.getElementById('videos-pagination').textContent = `Showing ${data.videos.length} of ${data.total} videos`;
             } catch (error) {
                 console.error('Error loading videos:', error);
@@ -1069,6 +1331,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         async function deleteVideo(id) {
             if (!confirm('Are you sure you want to delete this video?')) return;
+            
             try {
                 await fetch(`${API_BASE}/api/videos/${id}`, { method: 'DELETE' });
                 loadVideos();
@@ -1080,6 +1343,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         async function cleanupVideos() {
             if (!confirm('This will delete all failed/orphaned video files. Continue?')) return;
+            
             try {
                 const res = await fetch(`${API_BASE}/api/cleanup`, { method: 'POST' });
                 const result = await res.json();
@@ -1091,15 +1355,18 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
         }
         
+        // Episodes
         async function loadEpisodes() {
             try {
                 const res = await fetch(`${API_BASE}/api/episodes`);
                 const episodes = await res.json();
+                
                 const tbody = document.getElementById('episodes-tbody');
                 if (episodes.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">No episodes found</td></tr>';
                     return;
                 }
+                
                 tbody.innerHTML = episodes.map(e => `
                     <tr>
                         <td>${escapeHtml(e.filename)}</td>
@@ -1123,6 +1390,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         async function deleteEpisode(filename) {
             if (!confirm(`Delete episode ${filename}?`)) return;
+            
             try {
                 await fetch(`${API_BASE}/api/episodes/${filename}`, { method: 'DELETE' });
                 loadEpisodes();
@@ -1132,14 +1400,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
         }
         
+        // Quality
         async function loadQuality() {
             try {
                 const res = await fetch(`${API_BASE}/api/quality`);
                 const data = await res.json();
+                
                 document.getElementById('quality-passed').textContent = data.passed || 0;
                 document.getElementById('quality-failed').textContent = data.failed || 0;
                 document.getElementById('quality-avg').textContent = data.avg_score ? data.avg_score.toFixed(2) : '—';
                 document.getElementById('quality-rate').textContent = data.success_rate ? `${data.success_rate.toFixed(1)}%` : '—';
+                
                 const report = document.getElementById('quality-report');
                 if (data.report) {
                     report.innerHTML = `<pre style="color: var(--text-primary); white-space: pre-wrap;">${escapeHtml(JSON.stringify(data.report, null, 2))}</pre>`;
@@ -1151,10 +1422,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             }
         }
         
+        // Settings
         async function loadSettings() {
             try {
                 const res = await fetch(`${API_BASE}/api/settings`);
                 const settings = await res.json();
+                
                 document.getElementById('setting-auto-refresh').value = settings.auto_refresh ? 'true' : 'false';
                 document.getElementById('setting-refresh-interval').value = settings.refresh_interval || 5;
                 document.getElementById('setting-max-workers').value = settings.max_workers || 4;
@@ -1175,21 +1448,27 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 download_quality: document.getElementById('setting-quality').value,
                 detect_confidence: parseFloat(document.getElementById('setting-confidence').value)
             };
+            
             try {
                 const res = await fetch(`${API_BASE}/api/settings`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(settings)
                 });
-                if (res.ok) addActivity('success', 'Settings saved');
+                
+                if (res.ok) {
+                    addActivity('success', 'Settings saved');
+                }
             } catch (error) {
                 console.error('Error saving settings:', error);
             }
         }
         
+        // Activity
         function addActivity(type, message) {
             const list = document.getElementById('activity-list');
             const icons = { success: 'check-lg', info: 'info', warning: 'exclamation-triangle', error: 'x-circle' };
+            
             const item = document.createElement('div');
             item.className = 'activity-item';
             item.innerHTML = `
@@ -1199,10 +1478,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="activity-time">${new Date().toLocaleTimeString()}</div>
                 </div>
             `;
+            
             list.insertBefore(item, list.firstChild);
             while (list.children.length > 10) list.removeChild(list.lastChild);
         }
         
+        // Modal
         function showModal(title, body, onConfirm) {
             document.getElementById('modal-title').textContent = title;
             document.getElementById('modal-body').innerHTML = body;
@@ -1221,7 +1502,864 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
     </script>
 </body>
-</html>'''
+</html>
+"""
+        }
+        
+        .sidebar-footer {
+            position: absolute;
+            bottom: 20px;
+            left: 0;
+            right: 0;
+            padding: 0 20px;
+        }
+        
+        .db-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: var(--bg-dark);
+            border-radius: 8px;
+            font-size: 12px;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-red);
+        }
+        
+        .status-dot.connected {
+            background: var(--accent-green);
+        }
+        
+        /* Main Content */
+        .main-content {
+            margin-left: 220px;
+            min-height: 100vh;
+        }
+        
+        /* Top Bar */
+        .top-bar {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        
+        .page-title {
+            font-size: 20px;
+            font-weight: 600;
+        }
+        
+        .top-actions {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+        
+        .last-update {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+        
+        .btn-icon {
+            width: 36px;
+            height: 36px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-icon:hover {
+            background: var(--bg-hover);
+            border-color: var(--accent-blue);
+        }
+        
+        /* Control Panel */
+        .control-panel {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 20px 30px;
+        }
+        
+        .control-grid {
+            display: grid;
+            grid-template-columns: 220px 1fr 220px;
+            gap: 20px;
+        }
+        
+        .control-box {
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+        }
+        
+        .control-box h4 {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        
+        .btn-start {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: var(--accent-green);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            margin-bottom: 10px;
+        }
+        
+        .btn-start:hover {
+            filter: brightness(1.1);
+        }
+        
+        .btn-start:disabled {
+            background: var(--text-secondary);
+            cursor: not-allowed;
+        }
+        
+        .btn-stop {
+            width: 100%;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            background: var(--accent-red);
+            color: #fff;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn-stop:disabled {
+            background: var(--text-secondary);
+            cursor: not-allowed;
+        }
+        
+        .form-control-dark {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-radius: 6px;
+            padding: 8px 12px;
+        }
+        
+        .form-control-dark:focus {
+            background: var(--bg-card);
+            border-color: var(--accent-blue);
+            color: var(--text-primary);
+            box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+        }
+        
+        /* Progress Bars */
+        .progress-stages {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        
+        .stage-item {
+            text-align: center;
+        }
+        
+        .stage-label {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+        
+        .stage-progress {
+            height: 8px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        
+        .stage-progress .bar {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        
+        .stage-progress .bar.crawl { background: var(--accent-blue); }
+        .stage-progress .bar.download { background: var(--accent-purple); }
+        .stage-progress .bar.detect { background: var(--accent-yellow); }
+        .stage-progress .bar.upload { background: var(--accent-green); }
+        
+        .total-progress {
+            height: 12px;
+            background: var(--bg-card);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        
+        .total-progress .bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+        
+        .progress-status {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 8px;
+            font-size: 13px;
+        }
+        
+        .progress-status .label {
+            color: var(--text-secondary);
+        }
+        
+        .progress-status .value {
+            font-weight: 600;
+        }
+        
+        /* Stats */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .stat-row:last-child {
+            border-bottom: none;
+        }
+        
+        .stat-label {
+            color: var(--text-secondary);
+            font-size: 13px;
+        }
+        
+        .stat-value {
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+        
+        /* Dashboard Content */
+        .dashboard-content {
+            padding: 30px;
+        }
+        
+        /* Stats Cards */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .stat-card .icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+        
+        .stat-card .icon.blue { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+        .stat-card .icon.green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+        .stat-card .icon.yellow { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+        .stat-card .icon.purple { background: rgba(163, 113, 247, 0.15); color: var(--accent-purple); }
+        
+        .stat-card .value {
+            font-size: 32px;
+            font-weight: 700;
+            margin-bottom: 5px;
+        }
+        
+        .stat-card .label {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        
+        /* Charts Container */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .chart-card h3 {
+            font-size: 16px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        /* Recent Activity */
+        .activity-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .activity-item {
+            display: flex;
+            gap: 12px;
+            padding: 12px 0;
+            border-bottom: 1px solid var(--border-color);
+        }
+        
+        .activity-item:last-child {
+            border-bottom: none;
+        }
+        
+        .activity-icon {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+        
+        .activity-icon.success { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+        .activity-icon.info { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+        .activity-icon.warning { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+        
+        .activity-content {
+            flex: 1;
+        }
+        
+        .activity-title {
+            font-size: 13px;
+            margin-bottom: 2px;
+        }
+        
+        .activity-time {
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        
+        /* Log Panel */
+        .log-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .log-panel h3 {
+            font-size: 16px;
+            margin-bottom: 15px;
+        }
+        
+        .log-content {
+            background: var(--bg-dark);
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .log-line {
+            margin-bottom: 4px;
+        }
+        
+        .log-line.info { color: var(--accent-blue); }
+        .log-line.success { color: var(--accent-green); }
+        .log-line.warning { color: var(--accent-yellow); }
+        .log-line.error { color: var(--accent-red); }
+        
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .charts-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .control-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        @media (max-width: 768px) {
+            .sidebar {
+                transform: translateX(-100%);
+            }
+            
+            .main-content {
+                margin-left: 0;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .progress-stages {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Sidebar -->
+    <aside class="sidebar">
+        <div class="sidebar-logo">
+            🎬 P-ADE
+        </div>
+        <ul class="sidebar-nav">
+            <li><a href="#" class="active" data-page="overview"><i class="bi bi-graph-up"></i> Overview</a></li>
+            <li><a href="#" data-page="jobs"><i class="bi bi-list-task"></i> Jobs</a></li>
+            <li><a href="#" data-page="quality"><i class="bi bi-award"></i> Quality</a></li>
+            <li><a href="#" data-page="settings"><i class="bi bi-gear"></i> Settings</a></li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="db-status">
+                <span class="status-dot" id="db-status-dot"></span>
+                <span id="db-status-text">Checking...</span>
+            </div>
+            <div style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 11px;">
+                v1.0.0
+            </div>
+        </div>
+    </aside>
+    
+    <!-- Main Content -->
+    <main class="main-content">
+        <!-- Top Bar -->
+        <header class="top-bar">
+            <h1 class="page-title">Overview</h1>
+            <div class="top-actions">
+                <span class="last-update" id="last-update">Last update: —</span>
+                <button class="btn-icon" onclick="refreshData()" title="Refresh">
+                    <i class="bi bi-arrow-clockwise"></i>
+                </button>
+                <button class="btn-icon" onclick="toggleTheme()" title="Toggle Theme">
+                    <i class="bi bi-moon"></i>
+                </button>
+            </div>
+        </header>
+        
+        <!-- Control Panel -->
+        <section class="control-panel">
+            <div class="control-grid">
+                <!-- Pipeline Control -->
+                <div class="control-box">
+                    <h4>Pipeline Control</h4>
+                    <button class="btn-start" id="btn-start" onclick="startPipeline()">
+                        <i class="bi bi-play-fill"></i> Start Collection
+                    </button>
+                    <button class="btn-stop" id="btn-stop" onclick="stopPipeline()" disabled>
+                        <i class="bi bi-stop-fill"></i> Stop
+                    </button>
+                    <div style="margin-top: 15px;">
+                        <label style="font-size: 12px; color: var(--text-secondary);">Target Videos</label>
+                        <input type="number" class="form-control-dark w-100 mt-1" id="target-count" value="50" min="1" max="1000">
+                    </div>
+                </div>
+                
+                <!-- Progress -->
+                <div class="control-box">
+                    <h4>Pipeline Progress</h4>
+                    <div class="progress-stages">
+                        <div class="stage-item">
+                            <div class="stage-label">📡 Crawl</div>
+                            <div class="stage-progress">
+                                <div class="bar crawl" id="progress-crawl" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div class="stage-item">
+                            <div class="stage-label">📥 Download</div>
+                            <div class="stage-progress">
+                                <div class="bar download" id="progress-download" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div class="stage-item">
+                            <div class="stage-label">🔍 Detect</div>
+                            <div class="stage-progress">
+                                <div class="bar detect" id="progress-detect" style="width: 0%"></div>
+                            </div>
+                        </div>
+                        <div class="stage-item">
+                            <div class="stage-label">☁️ Upload</div>
+                            <div class="stage-progress">
+                                <div class="bar upload" id="progress-upload" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="total-progress">
+                        <div class="bar" id="progress-total" style="width: 0%"></div>
+                    </div>
+                    <div class="progress-status">
+                        <span class="label">Status:</span>
+                        <span class="value" id="pipeline-status">Ready</span>
+                    </div>
+                </div>
+                
+                <!-- Database Stats -->
+                <div class="control-box">
+                    <h4>Database Stats</h4>
+                    <div class="stat-row">
+                        <span class="stat-label">📹 Videos</span>
+                        <span class="stat-value" id="stat-videos">—</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">🎬 Episodes</span>
+                        <span class="stat-value" id="stat-episodes">—</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">📋 Queue</span>
+                        <span class="stat-value" id="stat-queue">—</span>
+                    </div>
+                    <div class="stat-row">
+                        <span class="stat-label">💾 Storage</span>
+                        <span class="stat-value" id="stat-storage">—</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+        
+        <!-- Dashboard Content -->
+        <section class="dashboard-content">
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="icon blue"><i class="bi bi-film"></i></div>
+                    <div class="value" id="card-videos">0</div>
+                    <div class="label">Total Videos</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon green"><i class="bi bi-collection-play"></i></div>
+                    <div class="value" id="card-episodes">0</div>
+                    <div class="label">Episodes Generated</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon yellow"><i class="bi bi-hdd"></i></div>
+                    <div class="value" id="card-storage">0 MB</div>
+                    <div class="label">Storage Used</div>
+                </div>
+                <div class="stat-card">
+                    <div class="icon purple"><i class="bi bi-graph-up-arrow"></i></div>
+                    <div class="value" id="card-quality">—</div>
+                    <div class="label">Avg Quality Score</div>
+                </div>
+            </div>
+            
+            <!-- Charts & Activity -->
+            <div class="charts-grid">
+                <!-- Pipeline Chart -->
+                <div class="chart-card">
+                    <h3><i class="bi bi-bar-chart"></i> Pipeline Overview</h3>
+                    <div id="pipeline-chart" style="height: 250px; display: flex; align-items: flex-end; gap: 20px; padding: 20px;">
+                        <div style="flex: 1; text-align: center;">
+                            <div style="background: var(--accent-blue); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-videos"></div>
+                            <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Videos</div>
+                        </div>
+                        <div style="flex: 1; text-align: center;">
+                            <div style="background: var(--accent-purple); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-poses"></div>
+                            <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Poses</div>
+                        </div>
+                        <div style="flex: 1; text-align: center;">
+                            <div style="background: var(--accent-green); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-episodes"></div>
+                            <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Episodes</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Recent Activity -->
+                <div class="chart-card">
+                    <h3><i class="bi bi-clock-history"></i> Recent Activity</h3>
+                    <div class="activity-list" id="activity-list">
+                        <div class="activity-item">
+                            <div class="activity-icon info"><i class="bi bi-info"></i></div>
+                            <div class="activity-content">
+                                <div class="activity-title">Dashboard started</div>
+                                <div class="activity-time">Just now</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Log Panel -->
+            <div class="log-panel">
+                <h3><i class="bi bi-terminal"></i> Pipeline Logs</h3>
+                <div class="log-content" id="log-content">
+                    <div class="log-line info">[INFO] Dashboard initialized</div>
+                    <div class="log-line">Waiting for pipeline to start...</div>
+                </div>
+            </div>
+        </section>
+    </main>
+    
+    <script>
+        // API Base URL
+        const API_BASE = '';
+        
+        // State
+        let isRunning = false;
+        let refreshInterval = null;
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshData();
+            startAutoRefresh();
+            setupNavigation();
+        });
+        
+        // Navigation
+        function setupNavigation() {
+            document.querySelectorAll('.sidebar-nav a').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    document.querySelectorAll('.sidebar-nav a').forEach(l => l.classList.remove('active'));
+                    link.classList.add('active');
+                    document.querySelector('.page-title').textContent = link.textContent.trim();
+                });
+            });
+        }
+        
+        // Auto Refresh
+        function startAutoRefresh() {
+            refreshInterval = setInterval(refreshData, 5000);
+        }
+        
+        // Refresh Data
+        async function refreshData() {
+            try {
+                // Get stats
+                const statsRes = await fetch(`${API_BASE}/api/stats`);
+                const stats = await statsRes.json();
+                
+                // Update DB status
+                const statusDot = document.getElementById('db-status-dot');
+                const statusText = document.getElementById('db-status-text');
+                if (stats.db.connected) {
+                    statusDot.classList.add('connected');
+                    statusText.textContent = 'DB Connected';
+                } else {
+                    statusDot.classList.remove('connected');
+                    statusText.textContent = 'DB Disconnected';
+                }
+                
+                // Update stats
+                document.getElementById('stat-videos').textContent = stats.files.raw_videos;
+                document.getElementById('stat-episodes').textContent = stats.files.episodes;
+                document.getElementById('stat-queue').textContent = stats.db.queue_depth || '—';
+                document.getElementById('stat-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
+                
+                // Update cards
+                document.getElementById('card-videos').textContent = stats.files.raw_videos;
+                document.getElementById('card-episodes').textContent = stats.files.episodes;
+                document.getElementById('card-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
+                document.getElementById('card-quality').textContent = stats.db.avg_quality ? stats.db.avg_quality.toFixed(2) : '—';
+                
+                // Update chart bars
+                const maxVal = Math.max(stats.files.raw_videos, stats.files.poses, stats.files.episodes, 1);
+                document.getElementById('chart-bar-videos').style.height = `${(stats.files.raw_videos / maxVal) * 180}px`;
+                document.getElementById('chart-bar-poses').style.height = `${(stats.files.poses / maxVal) * 180}px`;
+                document.getElementById('chart-bar-episodes').style.height = `${(stats.files.episodes / maxVal) * 180}px`;
+                
+                // Update timestamp
+                const now = new Date().toLocaleTimeString();
+                document.getElementById('last-update').textContent = `Last update: ${now}`;
+                
+                // Get pipeline status
+                const pipelineRes = await fetch(`${API_BASE}/api/pipeline/status`);
+                const pipeline = await pipelineRes.json();
+                
+                isRunning = pipeline.is_running;
+                updatePipelineUI(pipeline);
+                
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+            }
+        }
+        
+        // Update Pipeline UI
+        function updatePipelineUI(pipeline) {
+            // Buttons
+            document.getElementById('btn-start').disabled = pipeline.is_running;
+            document.getElementById('btn-stop').disabled = !pipeline.is_running;
+            
+            // Progress bars
+            document.getElementById('progress-crawl').style.width = `${pipeline.progress.crawl}%`;
+            document.getElementById('progress-download').style.width = `${pipeline.progress.download}%`;
+            document.getElementById('progress-detect').style.width = `${pipeline.progress.detect}%`;
+            document.getElementById('progress-upload').style.width = `${pipeline.progress.upload}%`;
+            
+            // Total progress
+            const total = (pipeline.progress.crawl + pipeline.progress.download + 
+                         pipeline.progress.detect + pipeline.progress.upload) / 4;
+            document.getElementById('progress-total').style.width = `${total}%`;
+            
+            // Status
+            let status = 'Ready';
+            if (pipeline.is_running) {
+                status = `Running: ${pipeline.current_stage || 'Initializing...'}`;
+            } else if (total > 0 && total < 100) {
+                status = 'Paused';
+            } else if (total >= 100) {
+                status = 'Completed';
+            }
+            document.getElementById('pipeline-status').textContent = status;
+            
+            // Logs
+            if (pipeline.logs && pipeline.logs.length > 0) {
+                const logContent = document.getElementById('log-content');
+                logContent.innerHTML = pipeline.logs.slice(-20).map(log => {
+                    let cls = '';
+                    if (log.includes('ERROR') || log.includes('❌')) cls = 'error';
+                    else if (log.includes('SUCCESS') || log.includes('✅') || log.includes('완료')) cls = 'success';
+                    else if (log.includes('WARN') || log.includes('⚠')) cls = 'warning';
+                    else if (log.includes('INFO') || log.includes('🔍') || log.includes('📥')) cls = 'info';
+                    return `<div class="log-line ${cls}">${log}</div>`;
+                }).join('');
+                logContent.scrollTop = logContent.scrollHeight;
+            }
+        }
+        
+        // Start Pipeline
+        async function startPipeline() {
+            const target = document.getElementById('target-count').value;
+            
+            try {
+                addActivity('info', 'Starting pipeline...');
+                
+                const res = await fetch(`${API_BASE}/api/pipeline/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_count: parseInt(target) })
+                });
+                
+                const result = await res.json();
+                
+                if (result.success) {
+                    addActivity('success', 'Pipeline started successfully');
+                    addLog('[INFO] Pipeline started');
+                } else {
+                    addActivity('warning', `Failed to start: ${result.message}`);
+                }
+                
+                refreshData();
+                
+            } catch (error) {
+                console.error('Error starting pipeline:', error);
+                addActivity('warning', 'Error starting pipeline');
+            }
+        }
+        
+        // Stop Pipeline
+        async function stopPipeline() {
+            try {
+                addActivity('warning', 'Stopping pipeline...');
+                
+                const res = await fetch(`${API_BASE}/api/pipeline/stop`, {
+                    method: 'POST'
+                });
+                
+                const result = await res.json();
+                
+                if (result.success) {
+                    addActivity('info', 'Pipeline stopped');
+                    addLog('[INFO] Pipeline stopped by user');
+                }
+                
+                refreshData();
+                
+            } catch (error) {
+                console.error('Error stopping pipeline:', error);
+            }
+        }
+        
+        // Add Activity
+        function addActivity(type, message) {
+            const list = document.getElementById('activity-list');
+            const icons = {
+                success: 'check-lg',
+                info: 'info',
+                warning: 'exclamation-triangle'
+            };
+            
+            const item = document.createElement('div');
+            item.className = 'activity-item';
+            item.innerHTML = `
+                <div class="activity-icon ${type}"><i class="bi bi-${icons[type]}"></i></div>
+                <div class="activity-content">
+                    <div class="activity-title">${message}</div>
+                    <div class="activity-time">${new Date().toLocaleTimeString()}</div>
+                </div>
+            `;
+            
+            list.insertBefore(item, list.firstChild);
+            
+            // Keep only last 10
+            while (list.children.length > 10) {
+                list.removeChild(list.lastChild);
+            }
+        }
+        
+        // Add Log
+        function addLog(message) {
+            const logContent = document.getElementById('log-content');
+            const line = document.createElement('div');
+            line.className = 'log-line';
+            if (message.includes('ERROR')) line.classList.add('error');
+            else if (message.includes('SUCCESS') || message.includes('완료')) line.classList.add('success');
+            else if (message.includes('INFO')) line.classList.add('info');
+            line.textContent = message;
+            logContent.appendChild(line);
+            logContent.scrollTop = logContent.scrollHeight;
+        }
+        
+        // Toggle Theme (placeholder)
+        function toggleTheme() {
+            document.body.classList.toggle('light-theme');
+        }
+    </script>
+</body>
+</html>
+"""
 
 
 # ============================================================================
@@ -1263,75 +2401,114 @@ def api_pipeline_start():
     
     data = request.json or {}
     target_count = data.get("target_count", 50)
-    stage = data.get("stage", "all")
     
     def run_pipeline():
         pipeline_state["is_running"] = True
         pipeline_state["started_at"] = datetime.now().isoformat()
-        pipeline_state["logs"] = [f"[INFO] Pipeline started - stage: {stage}, target: {target_count}"]
-        
-        env = os.environ.copy()
-        env["PYTHONIOENCODING"] = "utf-8"
-        
-        stages = ["crawl", "download", "detect", "upload"] if stage == "all" else [stage]
-        
-        # 작업 기록 추가
-        job_id = len(jobs_history) + 1
-        job = {
-            "id": job_id,
-            "stage": stage,
-            "status": "running",
-            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "progress": 0
-        }
-        jobs_history.insert(0, job)
+        pipeline_state["logs"] = ["[INFO] Pipeline started"]
         
         try:
-            for current_stage in stages:
-                if not pipeline_state["is_running"]:
-                    break
-                
-                pipeline_state["current_stage"] = current_stage
-                pipeline_state["logs"].append(f"[INFO] Starting {current_stage} stage...")
-                
-                cmd = [
-                    sys.executable, str(PROJECT_ROOT / "mass_collector.py"),
-                    "--target", str(target_count),
-                    "--stage", current_stage
-                ]
-                
-                proc = subprocess.Popen(
-                    cmd, cwd=str(PROJECT_ROOT),
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", env=env
-                )
-                pipeline_state["process"] = proc
-                
-                for line in proc.stdout:
-                    line = line.strip()
-                    if line:
-                        pipeline_state["logs"].append(line)
-                    if not pipeline_state["is_running"]:
-                        proc.terminate()
-                        break
-                
-                proc.wait()
-                pipeline_state["progress"][current_stage] = 100
-                
-                # 작업 진행률 업데이트
-                completed_stages = sum(1 for s in stages if pipeline_state["progress"].get(s, 0) >= 100)
-                job["progress"] = int(completed_stages / len(stages) * 100)
+            # Crawl stage
+            pipeline_state["current_stage"] = "crawl"
+            pipeline_state["logs"].append(f"[INFO] Starting crawl stage (target: {target_count})")
             
-            if pipeline_state["is_running"]:
-                pipeline_state["logs"].append("[SUCCESS] ✅ Pipeline completed!")
-                job["status"] = "completed"
-                job["progress"] = 100
-            else:
-                job["status"] = "stopped"
+            cmd = [
+                sys.executable, str(PROJECT_ROOT / "mass_collector.py"),
+                "--target", str(target_count),
+                "--stage", "crawl"
+            ]
+            
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            
+            proc = subprocess.Popen(
+                cmd, cwd=str(PROJECT_ROOT),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding="utf-8", errors="replace", env=env
+            )
+            pipeline_state["process"] = proc
+            
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    pipeline_state["logs"].append(line)
+                if not pipeline_state["is_running"]:
+                    proc.terminate()
+                    break
+            
+            proc.wait()
+            pipeline_state["progress"]["crawl"] = 100
+            
+            if not pipeline_state["is_running"]:
+                return
+            
+            # Download stage
+            pipeline_state["current_stage"] = "download"
+            pipeline_state["logs"].append("[INFO] Starting download stage")
+            
+            cmd = [sys.executable, str(PROJECT_ROOT / "mass_collector.py"), "--target", str(target_count), "--stage", "download"]
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env)
+            pipeline_state["process"] = proc
+            
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    pipeline_state["logs"].append(line)
+                if not pipeline_state["is_running"]:
+                    proc.terminate()
+                    break
+            
+            proc.wait()
+            pipeline_state["progress"]["download"] = 100
+            
+            if not pipeline_state["is_running"]:
+                return
+            
+            # Detect stage
+            pipeline_state["current_stage"] = "detect"
+            pipeline_state["logs"].append("[INFO] Starting detection stage")
+            
+            cmd = [sys.executable, str(PROJECT_ROOT / "mass_collector.py"), "--target", str(target_count), "--stage", "detect"]
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env)
+            pipeline_state["process"] = proc
+            
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    pipeline_state["logs"].append(line)
+                if not pipeline_state["is_running"]:
+                    proc.terminate()
+                    break
+            
+            proc.wait()
+            pipeline_state["progress"]["detect"] = 100
+            
+            if not pipeline_state["is_running"]:
+                return
+            
+            # Upload stage
+            pipeline_state["current_stage"] = "upload"
+            pipeline_state["logs"].append("[INFO] Starting upload stage")
+            
+            cmd = [sys.executable, str(PROJECT_ROOT / "mass_collector.py"), "--target", str(target_count), "--stage", "upload"]
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env)
+            pipeline_state["process"] = proc
+            
+            for line in proc.stdout:
+                line = line.strip()
+                if line:
+                    pipeline_state["logs"].append(line)
+                if not pipeline_state["is_running"]:
+                    proc.terminate()
+                    break
+            
+            proc.wait()
+            pipeline_state["progress"]["upload"] = 100
+            
+            pipeline_state["logs"].append("[SUCCESS] ✅ Pipeline completed!")
             
         except Exception as e:
             pipeline_state["logs"].append(f"[ERROR] {e}")
-            job["status"] = "failed"
         
         finally:
             pipeline_state["is_running"] = False
@@ -1341,7 +2518,7 @@ def api_pipeline_start():
     thread = threading.Thread(target=run_pipeline, daemon=True)
     thread.start()
     
-    return jsonify({"success": True, "message": f"Pipeline started: {stage}"})
+    return jsonify({"success": True, "message": "Pipeline started"})
 
 
 @app.route("/api/pipeline/stop", methods=["POST"])
@@ -1358,212 +2535,6 @@ def api_pipeline_stop():
     pipeline_state["logs"].append("[INFO] Pipeline stopped by user")
     
     return jsonify({"success": True, "message": "Pipeline stopped"})
-
-
-@app.route("/api/jobs")
-def api_jobs():
-    """작업 목록"""
-    return jsonify(jobs_history[:20])
-
-
-@app.route("/api/videos")
-def api_videos():
-    """비디오 목록"""
-    status_filter = request.args.get("status", "")
-    
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"videos": [], "total": 0})
-    
-    try:
-        if status_filter:
-            cur = conn.execute(
-                "SELECT id, video_id, title, duration, status, file_size FROM videos WHERE status = ? ORDER BY id DESC LIMIT 100",
-                (status_filter,)
-            )
-        else:
-            cur = conn.execute(
-                "SELECT id, video_id, title, duration, status, file_size FROM videos ORDER BY id DESC LIMIT 100"
-            )
-        
-        videos = []
-        for row in cur.fetchall():
-            videos.append({
-                "id": row["id"],
-                "video_id": row["video_id"],
-                "title": row["title"],
-                "duration": row["duration"],
-                "status": row["status"],
-                "size_mb": row["file_size"] / (1024 * 1024) if row["file_size"] else None
-            })
-        
-        # 전체 개수
-        cur = conn.execute("SELECT COUNT(*) FROM videos")
-        total = cur.fetchone()[0]
-        
-        conn.close()
-        return jsonify({"videos": videos, "total": total})
-    except Exception as e:
-        return jsonify({"videos": [], "total": 0, "error": str(e)})
-
-
-@app.route("/api/videos/<int:video_id>", methods=["DELETE"])
-def api_delete_video(video_id):
-    """비디오 삭제"""
-    conn = get_db_connection()
-    if not conn:
-        return jsonify({"success": False, "message": "DB not connected"})
-    
-    try:
-        # 파일 경로 조회
-        cur = conn.execute("SELECT video_id FROM videos WHERE id = ?", (video_id,))
-        row = cur.fetchone()
-        if row:
-            video_file = PROJECT_ROOT / "data" / "raw" / f"{row['video_id']}.mp4"
-            if video_file.exists():
-                video_file.unlink()
-        
-        # DB에서 삭제
-        conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
-        conn.commit()
-        conn.close()
-        
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)})
-
-
-@app.route("/api/episodes")
-def api_episodes():
-    """에피소드 목록"""
-    episodes_dir = PROJECT_ROOT / "data" / "episodes"
-    if not episodes_dir.exists():
-        return jsonify([])
-    
-    episodes = []
-    for f in sorted(episodes_dir.glob("*.npz"), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
-        stat = f.stat()
-        # video_id 추출 (파일명에서)
-        video_id = f.stem.split("_")[0] if "_" in f.stem else f.stem
-        episodes.append({
-            "filename": f.name,
-            "video_id": video_id,
-            "size_mb": stat.st_size / (1024 * 1024),
-            "created": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
-        })
-    
-    return jsonify(episodes)
-
-
-@app.route("/api/episodes/<filename>/download")
-def api_download_episode(filename):
-    """에피소드 다운로드"""
-    file_path = PROJECT_ROOT / "data" / "episodes" / filename
-    if file_path.exists():
-        return send_file(str(file_path), as_attachment=True)
-    return jsonify({"error": "File not found"}), 404
-
-
-@app.route("/api/episodes/<filename>", methods=["DELETE"])
-def api_delete_episode(filename):
-    """에피소드 삭제"""
-    file_path = PROJECT_ROOT / "data" / "episodes" / filename
-    if file_path.exists():
-        file_path.unlink()
-        return jsonify({"success": True})
-    return jsonify({"success": False, "message": "File not found"})
-
-
-@app.route("/api/cleanup", methods=["POST"])
-def api_cleanup():
-    """정리 작업"""
-    deleted = 0
-    
-    # 실패한 비디오 파일 삭제
-    raw_dir = PROJECT_ROOT / "data" / "raw"
-    if raw_dir.exists():
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.execute("SELECT video_id FROM videos WHERE status = 'failed'")
-                failed_ids = {row["video_id"] for row in cur.fetchall()}
-                
-                for f in raw_dir.glob("*.mp4"):
-                    if f.stem in failed_ids:
-                        f.unlink()
-                        deleted += 1
-                
-                # failed 상태 레코드 삭제
-                conn.execute("DELETE FROM videos WHERE status = 'failed'")
-                conn.commit()
-                conn.close()
-            except:
-                pass
-    
-    return jsonify({"success": True, "deleted": deleted})
-
-
-@app.route("/api/quality")
-def api_quality():
-    """품질 통계"""
-    quality_report_path = PROJECT_ROOT / "data" / "quality_report.json"
-    
-    result = {
-        "passed": 0,
-        "failed": 0,
-        "avg_score": 0,
-        "success_rate": 0,
-        "report": None
-    }
-    
-    conn = get_db_connection()
-    if conn:
-        try:
-            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
-            result["passed"] = cur.fetchone()[0]
-            
-            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'failed'")
-            result["failed"] = cur.fetchone()[0]
-            
-            total = result["passed"] + result["failed"]
-            if total > 0:
-                result["success_rate"] = (result["passed"] / total) * 100
-            
-            cur = conn.execute("SELECT AVG(quality_score) FROM videos WHERE quality_score IS NOT NULL")
-            avg = cur.fetchone()[0]
-            result["avg_score"] = avg if avg else 0
-            
-            conn.close()
-        except:
-            pass
-    
-    # 품질 보고서 로드
-    if quality_report_path.exists():
-        try:
-            with open(quality_report_path, "r") as f:
-                result["report"] = json.load(f)
-        except:
-            pass
-    
-    return jsonify(result)
-
-
-@app.route("/api/settings", methods=["GET"])
-def api_get_settings():
-    """설정 조회"""
-    return jsonify(settings_state)
-
-
-@app.route("/api/settings", methods=["POST"])
-def api_save_settings():
-    """설정 저장"""
-    data = request.json or {}
-    
-    for key in settings_state:
-        if key in data:
-            settings_state[key] = data[key]
-    
-    return jsonify({"success": True})
 
 
 # ============================================================================
