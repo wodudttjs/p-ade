@@ -1,0 +1,54 @@
+{
+  "started_at": "2026-02-08T02:42:28.543202",
+  "completed_at": "2026-02-08T02:44:04.687136",
+  "config": {
+    "target_count": 1,
+    "sources": [
+      "youtube",
+      "google_videos"
+    ],
+    "languages": [
+      "en",
+      "ko"
+    ],
+    "crawl_workers": 4,
+    "crawl_full_info": false,
+    "min_duration_sec": 30,
+    "max_duration_sec": 1200,
+    "content_filter": true,
+    "download_workers": 6,
+    "download_timeout": 600,
+    "download_quality": "720p",
+    "detect_fps": 5.0,
+    "detect_device": null,
+    "detect_batch_size": 50,
+    "s3_bucket": "",
+    "s3_prefix": "episodes",
+    "upload_workers": 4,
+    "db_path": "data/pade.db",
+    "raw_dir": "data/raw",
+    "episodes_dir": "data/episodes",
+    "urls_csv": "data/urls_mass.csv",
+    "report_path": "data/collection_report.json",
+    "dry_run": false,
+    "resume": true
+  },
+  "stages": [
+    {
+      "stage": "upload",
+      "success": true,
+      "count": 454,
+      "errors": 0,
+      "elapsed_sec": 96.14317607879639,
+      "details": {
+        "bucket": "p-ade-datasets",
+        "prefix": "episodes"
+      }
+    }
+  ],
+  "total_crawled": 0,
+  "total_downloaded": 0,
+  "total_episodes": 0,
+  "total_uploaded": 454,
+  "total_elapsed_sec": 96.14390897750854
+}
