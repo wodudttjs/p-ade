@@ -40,14 +40,25 @@
   - 에피소드 단위 NPZ 저장
 
 ### 📦 4단계: 데이터 변환 (Transform)
-- **모방학습용 NPZ 포맷** (`data/episodes/*.npz`)
+- **모방학습 데이터 생성** (`build_imitation_data.py`) - **⭐ NEW!**
+  - MediaPipe Tasks API 기반 비디오 → 포즈 추출
+  - 33개 관절 + 21개 손 랜드마크 추출
+  - State-Action 인코딩 (state_dim=199, action_dim=100)
+  - 그리퍼(손 오므림) 상태 자동 추정
+  - 관절 속도(velocity), 정규화, 중앙차분 계산
   ```
-  states: [T, N_objects, 4]  # x, y, w, h (정규화)
-  actions: [T-1, N_objects, 4]  # Δstate
-  timestamps: [T]
-  confidence: [T, N_objects]
-  metadata: {video_id, fps, duration, quality_score}
+  states:       [T, 199]    # 관절위치(99) + 속도(99) + 신뢰도(1)
+  actions:      [T-1, 100]  # 관절 delta(99) + gripper(1)
+  poses:        [T, 33, 3]  # 정규화된 관절 좌표
+  velocity:     [T, 33, 3]  # 관절 속도
+  left_hand:    [T, 21, 3]  # 왼손 랜드마크
+  right_hand:   [T, 21, 3]  # 오른손 랜드마크
+  gripper_state:[T]          # 그리퍼 상태 (0=열림, 1=닫힘)
+  confidence:   [T]          # 포즈 검출 신뢰도
   ```
+- **레거시 객체 검출** (`extraction/detect_to_episodes.py`)
+  - YOLO 프레임 단위 객체 검출
+  - 바운딩 박스, 신뢰도 점수 추출
 
 ### ☁️ 5단계: 클라우드 업로드 (Upload)
 - **AWS S3 업로드** (`upload_to_s3.py`)
@@ -56,11 +67,12 @@
   - Multipart 업로드 지원
 
 ### 📊 6단계: 모니터링 (Monitor)
-- **웹 대시보드** (`dashboard/web_app.py`) - **NEW!**
+- **웹 대시보드** (`dashboard/web_app.py`) - **⭐ NEW!**
   - Flask 기반 실시간 웹 UI
   - 파이프라인 진행률 시각화
   - Start/Stop 제어
   - DB 통계, 로그 스트리밍
+  - **IL Data 페이지**: 모방학습 데이터 현황/품질 시각화
 - **데스크톱 대시보드** (`dashboard/app.py`)
   - PySide6 기반 GUI (레거시)
 
@@ -83,7 +95,8 @@ p-ade-master/
 │   ├── web_app.py       # Flask 웹 대시보드 ⭐
 │   ├── app.py           # PySide6 데스크톱 앱
 │   └── data_service.py  # DB 서비스
-├── models/              # SQLAlchemy 모델
+├── models/              # SQLAlchemy 모델 + MediaPipe 모델
+│   └── mediapipe/       # pose_landmarker.task, hand_landmarker.task
 ├── core/                # 공통 유틸리티
 ├── config/              # 설정
 ├── tests/               # 테스트
@@ -92,6 +105,7 @@ p-ade-master/
 │   ├── episodes/        # 생성된 npz
 │   └── pade.db          # SQLite DB
 ├── mass_collector.py    # 전체 파이프라인 오케스트레이터 ⭐
+├── build_imitation_data.py # 모방학습 데이터 생성 ⭐
 ├── parallel_download.py # 병렬 다운로드
 ├── upload_to_s3.py      # S3 업로드
 └── requirements.txt     # 의존성
@@ -135,6 +149,19 @@ python mass_collector.py --target 100 --stage upload
 python mass_collector.py --target 500 --dry-run
 ```
 
+### 3-1. 모방학습 데이터 생성
+
+```bash
+# 전체 비디오 → IL 데이터 변환 (이미 있으면 스킵)
+python build_imitation_data.py
+
+# 10개만 테스트
+python build_imitation_data.py --limit 10 --fps 5 --max-frames 50
+
+# 옵션
+python build_imitation_data.py --fps 10 --max-frames 200 --limit 100
+```
+
 ### 4. 웹 대시보드 실행
 
 ```bash
@@ -150,9 +177,22 @@ python run_dashboard.py
 | 단계 | 결과 |
 |------|------|
 | 크롤링 | 467개 URL 수집 |
-| 다운로드 | 465개 mp4 (720p) |
-| 객체 검출 | 454개 에피소드 (.npz) |
+| 다운로드 | 466개 mp4 (720p) |
+| 객체 검출 | 455개 에피소드 (.npz) |
+| **모방학습 데이터** | **455개 IL 에피소드 (states/actions/poses)** |
 | S3 업로드 | 454개 전량 업로드 완료 |
+
+### 🤖 모방학습 데이터 품질 (IL Data)
+
+| 항목 | 값 |
+|------|-----|
+| IL 에피소드 수 | 455+ |
+| State 차원 | 199 (관절99 + 속도99 + 신뢰도1) |
+| Action 차원 | 100 (관절delta99 + gripper1) |
+| 총 프레임 수 | 45,000+ |
+| 평균 Confidence | 0.24 |
+| 학습 가능 에피소드 | 70%+ (conf>0.1 & frames≥5) |
+| NaN/Inf | 없음 ✅ |
 
 **S3 경로**: `s3://p-ade-datasets/episodes/2026/02/08/`
 
@@ -163,7 +203,7 @@ python run_dashboard.py
 | **언어** | Python 3.10+ |
 | **크롤링** | yt-dlp, requests, concurrent.futures |
 | **비디오** | OpenCV, ffmpeg |
-| **AI/ML** | YOLOv8 (ultralytics), MediaPipe |
+| **AI/ML** | YOLOv8 (ultralytics), MediaPipe Tasks API |
 | **데이터** | NumPy, Pandas |
 | **클라우드** | AWS S3 (boto3) |
 | **DB** | SQLite (SQLAlchemy) |
@@ -172,31 +212,45 @@ python run_dashboard.py
 
 ## 📁 데이터 포맷
 
-### Episode NPZ 구조
+### 모방학습 Episode NPZ 구조 (IL Data)
 ```python
 import numpy as np
 data = np.load('episode.npz', allow_pickle=True)
 
-# 필수 키
-data['states']      # [T, N, 4] - 바운딩 박스 (x, y, w, h)
-data['timestamps']  # [T] - 타임스탬프 (초)
-data['confidence']  # [T, N] - 검출 신뢰도
+# 핵심 모방학습 데이터
+data['states']        # [T, 199]   - 관절위치(99) + 속도(99) + 신뢰도(1)
+data['actions']       # [T-1, 100] - 관절 delta(99) + gripper(1)
 
-# 선택 키
-data['actions']     # [T-1, N, 4] - 상태 변화량
-data['metadata']    # dict - 메타정보
+# 포즈 데이터
+data['poses']         # [T, 33, 3] - 정규화된 관절 좌표 (hip 중심, 어깨너비 스케일)
+data['poses_raw']     # [T, 33, 3] - 원시 관절 좌표
+data['poses_world']   # [T, 33, 3] - 월드 좌표계
+
+# 손 & 그리퍼
+data['left_hand']     # [T, 21, 3] - 왼손 랜드마크
+data['right_hand']    # [T, 21, 3] - 오른손 랜드마크
+data['gripper_state'] # [T]        - 그리퍼 상태 (0=열림, 1=닫힘)
+
+# 메타
+data['velocity']      # [T, 33, 3] - 관절 속도 (중앙차분)
+data['timestamps']    # [T]        - 타임스탬프 (초)
+data['confidence']    # [T]        - 포즈 검출 신뢰도
+data['video_id']      # str        - 원본 비디오 ID
+data['fps']           # float      - 추출 FPS
 ```
 
-### 메타데이터
+### 빠른 사용 예시
 ```python
-{
-    'video_id': 'xxx',
-    'source_url': 'https://youtube.com/...',
-    'fps': 30.0,
-    'duration_sec': 120.5,
-    'quality_score': 0.85,
-    'created_at': '2026-02-08T...'
-}
+# 모방학습 학습 루프
+data = np.load('data/episodes/video_episode.npz', allow_pickle=True)
+states = data['states']    # [T, 199]
+actions = data['actions']  # [T-1, 100]
+
+for t in range(len(actions)):
+    state = states[t]      # 현재 상태
+    action = actions[t]    # 취해야 할 행동
+    next_state = states[t+1]  # 다음 상태
+    # policy.train(state, action)
 ```
 
 ## 🔧 설정 옵션

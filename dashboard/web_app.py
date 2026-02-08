@@ -508,6 +508,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <li><a href="#" data-page="videos"><i class="bi bi-film"></i> Videos</a></li>
             <li><a href="#" data-page="episodes"><i class="bi bi-collection-play"></i> Episodes</a></li>
             <li><a href="#" data-page="quality"><i class="bi bi-award"></i> Quality</a></li>
+            <li><a href="#" data-page="ildata"><i class="bi bi-robot"></i> IL Data</a></li>
             <li><a href="#" data-page="settings"><i class="bi bi-gear"></i> Settings</a></li>
         </ul>
         <div class="sidebar-footer">
@@ -841,6 +842,88 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 </div>
             </section>
         </div>
+        
+        <!-- IL Data Page -->
+        <div class="page-container" id="page-ildata">
+            <section class="dashboard-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-robot"></i></div>
+                        <div class="value" id="il-total">0</div>
+                        <div class="label">IL Episodes</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-check-circle"></i></div>
+                        <div class="value" id="il-ready">0</div>
+                        <div class="label">Training Ready</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-layers"></i></div>
+                        <div class="value" id="il-state-dim">—</div>
+                        <div class="label">State Dim</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon purple"><i class="bi bi-joystick"></i></div>
+                        <div class="value" id="il-action-dim">—</div>
+                        <div class="label">Action Dim</div>
+                    </div>
+                </div>
+                
+                <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr);">
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-film"></i></div>
+                        <div class="value" id="il-total-frames">0</div>
+                        <div class="label">Total Frames</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-hand-index"></i></div>
+                        <div class="value" id="il-avg-gripper">—</div>
+                        <div class="label">Avg Gripper</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-eye"></i></div>
+                        <div class="value" id="il-avg-conf">—</div>
+                        <div class="label">Avg Confidence</div>
+                    </div>
+                </div>
+                
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3><i class="bi bi-bar-chart"></i> Data Distribution</h3>
+                        <div id="il-distribution" style="padding: 20px;">
+                            <div style="display: flex; gap: 20px; align-items: flex-end; height: 200px;" id="il-dist-bars"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-card">
+                        <h3><i class="bi bi-clipboard-data"></i> Data Quality Summary</h3>
+                        <div id="il-quality-summary" style="padding: 20px;">
+                            <p style="color: var(--text-secondary);">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="chart-card">
+                    <h3><i class="bi bi-table"></i> IL Episodes
+                        <div style="margin-left: auto; display: flex; gap: 10px;">
+                            <button class="btn-action btn-sm btn-primary" onclick="loadILData()">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button class="btn-action btn-sm btn-success" onclick="runBuildIL()">
+                                <i class="bi bi-play-fill"></i> Build IL Data
+                            </button>
+                        </div>
+                    </h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>Video ID</th><th>Frames</th><th>State</th><th>Action</th><th>Confidence</th><th>Gripper</th><th>Size</th></tr>
+                        </thead>
+                        <tbody id="ildata-tbody"></tbody>
+                    </table>
+                    <div style="padding: 10px; text-align: center; color: var(--text-secondary);" id="il-pagination"></div>
+                </div>
+            </section>
+        </div>
     </main>
     
     <div class="modal-overlay" id="modal">
@@ -891,6 +974,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             else if (page === 'videos') loadVideos();
             else if (page === 'episodes') loadEpisodes();
             else if (page === 'quality') loadQuality();
+            else if (page === 'ildata') loadILData();
             else if (page === 'settings') loadSettings();
         }
         
@@ -1218,6 +1302,92 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function confirmModal() {
             if (modalCallback) modalCallback();
             closeModal();
+        }
+        
+        // ============ IL Data Functions ============
+        async function loadILData() {
+            try {
+                const res = await fetch(`${API_BASE}/api/ildata`);
+                const data = await res.json();
+                
+                document.getElementById('il-total').textContent = data.total || 0;
+                document.getElementById('il-ready').textContent = data.ready || 0;
+                document.getElementById('il-state-dim').textContent = data.state_dim || '—';
+                document.getElementById('il-action-dim').textContent = data.action_dim || '—';
+                document.getElementById('il-total-frames').textContent = (data.total_frames || 0).toLocaleString();
+                document.getElementById('il-avg-gripper').textContent = data.avg_gripper != null ? data.avg_gripper.toFixed(3) : '—';
+                document.getElementById('il-avg-conf').textContent = data.avg_confidence != null ? data.avg_confidence.toFixed(3) : '—';
+                
+                // Distribution bars
+                const distBars = document.getElementById('il-dist-bars');
+                if (data.distribution) {
+                    const maxVal = Math.max(...Object.values(data.distribution), 1);
+                    distBars.innerHTML = Object.entries(data.distribution).map(([k, v]) => {
+                        const h = Math.max(5, (v / maxVal) * 180);
+                        const colors = {states:'var(--accent-blue)', actions:'var(--accent-green)',
+                                       poses:'var(--accent-purple)', velocity:'var(--accent-yellow)',
+                                       gripper:'var(--accent-red)', hands:'#e091d3'};
+                        return `<div style="flex:1;text-align:center;">
+                            <div style="font-size:13px;color:var(--text-primary);margin-bottom:5px;">${v}</div>
+                            <div style="height:${h}px;background:${colors[k]||'var(--accent-blue)'};border-radius:6px 6px 0 0;"></div>
+                            <div style="margin-top:8px;font-size:11px;color:var(--text-secondary);">${k}</div>
+                        </div>`;
+                    }).join('');
+                }
+                
+                // Quality summary
+                const qs = document.getElementById('il-quality-summary');
+                if (data.quality) {
+                    const q = data.quality;
+                    qs.innerHTML = `
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                            <div class="stat-row"><span class="stat-label">States range</span><span class="stat-value">[${q.states_min?.toFixed(2)}, ${q.states_max?.toFixed(2)}]</span></div>
+                            <div class="stat-row"><span class="stat-label">Actions range</span><span class="stat-value">[${q.actions_min?.toFixed(2)}, ${q.actions_max?.toFixed(2)}]</span></div>
+                            <div class="stat-row"><span class="stat-label">States std</span><span class="stat-value">${q.states_std?.toFixed(4)}</span></div>
+                            <div class="stat-row"><span class="stat-label">Actions std</span><span class="stat-value">${q.actions_std?.toFixed(4)}</span></div>
+                            <div class="stat-row"><span class="stat-label">Avg frames/ep</span><span class="stat-value">${q.avg_frames?.toFixed(1)}</span></div>
+                            <div class="stat-row"><span class="stat-label">Legacy (no IL)</span><span class="stat-value">${data.legacy || 0}</span></div>
+                        </div>
+                    `;
+                }
+                
+                // Episodes table
+                const tbody = document.getElementById('ildata-tbody');
+                if (data.episodes && data.episodes.length > 0) {
+                    tbody.innerHTML = data.episodes.map(ep => `<tr>
+                        <td><code>${escapeHtml(ep.video_id)}</code></td>
+                        <td>${ep.frames}</td>
+                        <td>${ep.state_dim}</td>
+                        <td>${ep.action_dim}</td>
+                        <td><span style="color:${ep.confidence > 0.3 ? 'var(--accent-green)' : 'var(--accent-red)'}">${ep.confidence.toFixed(3)}</span></td>
+                        <td>${ep.gripper.toFixed(3)}</td>
+                        <td>${ep.size_kb} KB</td>
+                    </tr>`).join('');
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">No IL data found. Click "Build IL Data" to generate.</td></tr>';
+                }
+                
+                document.getElementById('il-pagination').textContent = `Showing ${(data.episodes||[]).length} of ${data.total} IL episodes`;
+            } catch (error) {
+                console.error('Error loading IL data:', error);
+            }
+        }
+        
+        async function runBuildIL() {
+            showModal('Build IL Data', '<p>Run build_imitation_data.py to generate Imitation Learning data from all videos?</p><p style="color:var(--text-secondary);font-size:13px;">This may take a while depending on the number of videos.</p>', async () => {
+                try {
+                    addActivity('info', 'Starting IL data build...');
+                    const res = await fetch(`${API_BASE}/api/ildata/build`, {method: 'POST'});
+                    const data = await res.json();
+                    if (data.success) {
+                        addActivity('success', data.message || 'IL build started');
+                    } else {
+                        addActivity('error', data.error || 'IL build failed');
+                    }
+                } catch (error) {
+                    addActivity('error', 'Failed to start IL build');
+                }
+            });
         }
     </script>
 </body>
@@ -1564,6 +1734,144 @@ def api_save_settings():
             settings_state[key] = data[key]
     
     return jsonify({"success": True})
+
+
+@app.route("/api/ildata")
+def api_ildata():
+    """모방학습 데이터 현황"""
+    import numpy as np
+    
+    episodes_dir = PROJECT_ROOT / "data" / "episodes"
+    result = {
+        "total": 0, "ready": 0, "legacy": 0,
+        "state_dim": None, "action_dim": None,
+        "total_frames": 0, "avg_gripper": None, "avg_confidence": None,
+        "distribution": {}, "quality": {}, "episodes": []
+    }
+    
+    if not episodes_dir.exists():
+        return jsonify(result)
+    
+    npz_files = sorted(episodes_dir.glob("*_episode.npz"))
+    il_episodes = []
+    legacy_count = 0
+    all_frames = []
+    all_gripper = []
+    all_conf = []
+    all_states_min, all_states_max, all_states_std = [], [], []
+    all_actions_min, all_actions_max, all_actions_std = [], [], []
+    has_states = 0
+    has_hands = 0
+    
+    for f in npz_files:
+        try:
+            d = np.load(f, allow_pickle=True)
+            if "states" not in d:
+                legacy_count += 1
+                continue
+            
+            frames = int(d["num_frames"]) if "num_frames" in d else d["states"].shape[0]
+            state_dim = int(d["state_dim"]) if "state_dim" in d else d["states"].shape[1]
+            action_dim = int(d["action_dim"]) if "action_dim" in d else d["actions"].shape[1]
+            avg_conf = float(np.mean(d["confidence"])) if "confidence" in d else 0
+            avg_grip = float(np.mean(d["gripper_state"])) if "gripper_state" in d else 0
+            size_kb = round(f.stat().st_size / 1024, 1)
+            video_id = str(d["video_id"]) if "video_id" in d else f.stem.replace("_episode", "")
+            
+            all_frames.append(frames)
+            all_gripper.append(avg_grip)
+            all_conf.append(avg_conf)
+            has_states += 1
+            
+            if "left_hand" in d:
+                lh = d["left_hand"]
+                if np.any(lh != 0):
+                    has_hands += 1
+            
+            # 값 범위 통계
+            all_states_min.append(float(d["states"].min()))
+            all_states_max.append(float(d["states"].max()))
+            all_states_std.append(float(d["states"].std()))
+            all_actions_min.append(float(d["actions"].min()))
+            all_actions_max.append(float(d["actions"].max()))
+            all_actions_std.append(float(d["actions"].std()))
+            
+            il_episodes.append({
+                "video_id": video_id,
+                "frames": frames,
+                "state_dim": state_dim,
+                "action_dim": action_dim,
+                "confidence": avg_conf,
+                "gripper": avg_grip,
+                "size_kb": size_kb,
+            })
+            
+            if result["state_dim"] is None:
+                result["state_dim"] = state_dim
+                result["action_dim"] = action_dim
+        except Exception:
+            legacy_count += 1
+    
+    result["total"] = len(il_episodes)
+    result["legacy"] = legacy_count
+    result["ready"] = sum(1 for e in il_episodes if e["confidence"] > 0.1 and e["frames"] >= 5)
+    result["total_frames"] = sum(all_frames)
+    result["avg_gripper"] = float(np.mean(all_gripper)) if all_gripper else None
+    result["avg_confidence"] = float(np.mean(all_conf)) if all_conf else None
+    
+    result["distribution"] = {
+        "states": has_states,
+        "actions": has_states,
+        "poses": has_states,
+        "velocity": has_states,
+        "gripper": has_states,
+        "hands": has_hands,
+    }
+    
+    if all_states_min:
+        result["quality"] = {
+            "states_min": float(np.mean(all_states_min)),
+            "states_max": float(np.mean(all_states_max)),
+            "states_std": float(np.mean(all_states_std)),
+            "actions_min": float(np.mean(all_actions_min)),
+            "actions_max": float(np.mean(all_actions_max)),
+            "actions_std": float(np.mean(all_actions_std)),
+            "avg_frames": float(np.mean(all_frames)),
+        }
+    
+    # 최대 100개만 리턴
+    result["episodes"] = il_episodes[:100]
+    
+    return jsonify(result)
+
+
+@app.route("/api/ildata/build", methods=["POST"])
+def api_build_ildata():
+    """모방학습 데이터 빌드 실행"""
+    try:
+        cmd = [
+            sys.executable, str(PROJECT_ROOT / "build_imitation_data.py"),
+            "--fps", "5", "--max-frames", "100"
+        ]
+        proc = subprocess.Popen(
+            cmd, cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+        )
+        
+        def monitor_build():
+            for line in proc.stdout:
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if decoded:
+                    pipeline_state["logs"].append(f"[IL-BUILD] {decoded}")
+                    if len(pipeline_state["logs"]) > 500:
+                        pipeline_state["logs"] = pipeline_state["logs"][-300:]
+        
+        t = threading.Thread(target=monitor_build, daemon=True)
+        t.start()
+        
+        return jsonify({"success": True, "message": "IL data build started in background"})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
 
 
 # ============================================================================
