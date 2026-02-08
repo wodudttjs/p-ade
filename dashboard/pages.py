@@ -58,7 +58,7 @@ class OverviewPage(QWidget):
         content_layout.setSpacing(20)
         
         # 헤더
-        header = SectionHeader("Overview", "파이프라인 전체 현황")
+        header = SectionHeader("개요", "파이프라인 전체 현황")
         content_layout.addWidget(header)
         
         # KPI 그리드
@@ -67,12 +67,12 @@ class OverviewPage(QWidget):
         
         self.kpi_cards = {}
         kpis = [
-            ("total_videos", "Total Videos", Colors.ACCENT_BLUE),
-            ("downloaded", "Downloaded", Colors.ACCENT_GREEN),
-            ("episodes", "Episodes", Colors.ACCENT_PURPLE),
-            ("high_quality", "High Quality", Colors.SUCCESS),
-            ("storage_gb", "Storage (GB)", Colors.ACCENT_YELLOW),
-            ("monthly_cost", "Monthly Cost ($)", Colors.WARNING),
+            ("total_videos", "전체 비디오", Colors.ACCENT_BLUE),
+            ("downloaded", "다운로드됨", Colors.ACCENT_GREEN),
+            ("episodes", "에피소드", Colors.ACCENT_PURPLE),
+            ("high_quality", "고품질", Colors.SUCCESS),
+            ("storage_gb", "저장소 (GB)", Colors.ACCENT_YELLOW),
+            ("monthly_cost", "월간 비용 (원)", Colors.WARNING),
         ]
         
         for i, (key, title, color) in enumerate(kpis):
@@ -86,7 +86,7 @@ class OverviewPage(QWidget):
         content_layout.addWidget(Separator())
         
         # 처리 통계
-        stats_header = SectionHeader("Processing Stats", "처리 성능 지표")
+        stats_header = SectionHeader("처리 통계", "처리 성능 지표")
         content_layout.addWidget(stats_header)
         
         stats_grid = QGridLayout()
@@ -94,10 +94,10 @@ class OverviewPage(QWidget):
         
         self.stats_cards = {}
         stats = [
-            ("success_rate", "Success Rate", Colors.SUCCESS),
-            ("avg_time", "Avg Processing Time", Colors.ACCENT_BLUE),
-            ("queue_depth", "Queue Depth", Colors.ACCENT_PURPLE),
-            ("active_workers", "Active Workers", Colors.ACCENT_GREEN),
+            ("success_rate", "성공률", Colors.SUCCESS),
+            ("avg_time", "평균 처리 시간", Colors.ACCENT_BLUE),
+            ("queue_depth", "큐 깊이", Colors.ACCENT_PURPLE),
+            ("active_workers", "활성 작업자", Colors.ACCENT_GREEN),
         ]
         
         for i, (key, title, color) in enumerate(stats):
@@ -111,7 +111,7 @@ class OverviewPage(QWidget):
         content_layout.addWidget(Separator())
         
         # 시스템 리소스
-        resource_header = SectionHeader("System Resources", "리소스 사용량")
+        resource_header = SectionHeader("시스템 리소스", "리소스 사용량")
         content_layout.addWidget(resource_header)
         
         resource_grid = QGridLayout()
@@ -120,8 +120,8 @@ class OverviewPage(QWidget):
         self.resource_meters = {}
         resources = [
             ("cpu", "CPU"),
-            ("memory", "Memory"),
-            ("disk", "Disk"),
+            ("memory", "메모리"),
+            ("disk", "디스크"),
             ("gpu", "GPU"),
         ]
         
@@ -134,7 +134,7 @@ class OverviewPage(QWidget):
         
         # 품질 분포
         content_layout.addWidget(Separator())
-        quality_header = SectionHeader("Quality Distribution", "품질 메트릭 분포")
+        quality_header = SectionHeader("품질 분포", "품질 메트릭 분포")
         content_layout.addWidget(quality_header)
         
         quality_grid = QGridLayout()
@@ -142,10 +142,10 @@ class OverviewPage(QWidget):
         
         self.quality_cards = {}
         quality_items = [
-            ("pass_rate", "Pass Rate", Colors.SUCCESS),
-            ("confidence", "Confidence (mean)", Colors.ACCENT_BLUE),
-            ("jitter", "Jitter (mean)", Colors.ACCENT_PURPLE),
-            ("nan_ratio", "NaN Ratio", Colors.WARNING),
+            ("pass_rate", "합격률", Colors.SUCCESS),
+            ("confidence", "신뢰도 (평균)", Colors.ACCENT_BLUE),
+            ("jitter", "지터 (평균)", Colors.ACCENT_PURPLE),
+            ("nan_ratio", "NaN 비율", Colors.WARNING),
         ]
         
         for i, (key, title, color) in enumerate(quality_items):
@@ -218,38 +218,38 @@ class JobsPage(QWidget):
         layout.setSpacing(10)
         
         # 헤더
-        header = SectionHeader("Jobs", "작업 목록 및 상태")
+        header = SectionHeader("작업", "작업 목록 및 상태")
         layout.addWidget(header)
         
         # 필터 박스
-        filter_box = QGroupBox("Filters")
+        filter_box = QGroupBox("필터")
         filter_layout = QHBoxLayout(filter_box)
         
         # 검색
-        filter_layout.addWidget(QLabel("Search:"))
+        filter_layout.addWidget(QLabel("검색:"))
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("job_key, video_id, episode_id, error...")
         self.search_input.setMinimumWidth(200)
         filter_layout.addWidget(self.search_input, 3)
         
         # Stage 필터
-        filter_layout.addWidget(QLabel("Stage:"))
+        filter_layout.addWidget(QLabel("단계:"))
         self.stage_combo = QComboBox()
         self.stage_combo.addItems(["all"] + STAGES)
         filter_layout.addWidget(self.stage_combo, 1)
         
         # Status 필터
-        filter_layout.addWidget(QLabel("Status:"))
+        filter_layout.addWidget(QLabel("상태:"))
         self.status_combo = QComboBox()
         self.status_combo.addItems(["all"] + STATUSES)
         filter_layout.addWidget(self.status_combo, 1)
         
         # 버튼
-        self.btn_apply = QPushButton("Apply")
+        self.btn_apply = QPushButton("적용")
         self.btn_apply.setObjectName("primary")
         filter_layout.addWidget(self.btn_apply)
         
-        self.btn_clear = QPushButton("Clear")
+        self.btn_clear = QPushButton("초기화")
         filter_layout.addWidget(self.btn_clear)
         
         layout.addWidget(filter_box)
@@ -281,12 +281,12 @@ class JobsPage(QWidget):
         
         # 통계 바
         stats_layout = QHBoxLayout()
-        self.stats_label = QLabel("Total: 0")
+        self.stats_label = QLabel("총합: 0")
         self.stats_label.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
         stats_layout.addWidget(self.stats_label)
         stats_layout.addStretch()
         
-        self.btn_refresh = QPushButton("🔄 Refresh")
+        self.btn_refresh = QPushButton("🔄 새로고침")
         stats_layout.addWidget(self.btn_refresh)
         
         table_layout.addLayout(stats_layout)
@@ -297,11 +297,11 @@ class JobsPage(QWidget):
         detail_widget = QWidget()
         detail_layout = QVBoxLayout(detail_widget)
         
-        self.detail_title = QLabel("Job Detail")
+        self.detail_title = QLabel("작업 상세")
         self.detail_title.setStyleSheet("font-size: 14px; font-weight: 700;")
         detail_layout.addWidget(self.detail_title)
         
-        self.detail_info = QLabel("Select a job to view details")
+        self.detail_info = QLabel("작업을 선택하면 상세 정보가 표시됩니다")
         self.detail_info.setWordWrap(True)
         self.detail_info.setStyleSheet(f"color: {Colors.TEXT_SECONDARY};")
         detail_layout.addWidget(self.detail_info)
@@ -313,7 +313,7 @@ class JobsPage(QWidget):
         self.logs_text = QTextEdit()
         self.logs_text.setReadOnly(True)
         self.logs_text.setPlaceholderText("Logs will appear here...")
-        self.detail_tabs.addTab(self.logs_text, "Logs")
+        self.detail_tabs.addTab(self.logs_text, "로그")
         
         # Metrics 탭
         metrics_widget = QWidget()
@@ -321,17 +321,17 @@ class JobsPage(QWidget):
         self.metrics_text = QTextEdit()
         self.metrics_text.setReadOnly(True)
         metrics_layout.addWidget(self.metrics_text)
-        self.detail_tabs.addTab(metrics_widget, "Metrics")
+        self.detail_tabs.addTab(metrics_widget, "메트릭")
         
         detail_layout.addWidget(self.detail_tabs)
         
         # 액션 버튼
         action_layout = QHBoxLayout()
-        self.btn_retry = QPushButton("🔁 Retry")
+        self.btn_retry = QPushButton("🔁 재시도")
         self.btn_retry.setEnabled(False)
         action_layout.addWidget(self.btn_retry)
         
-        self.btn_cancel = QPushButton("⏹ Cancel")
+        self.btn_cancel = QPushButton("⏹ 취소")
         self.btn_cancel.setObjectName("danger")
         self.btn_cancel.setEnabled(False)
         action_layout.addWidget(self.btn_cancel)
@@ -381,7 +381,7 @@ class JobsPage(QWidget):
         """통계 업데이트"""
         stats = self.model.getStats()
         self.stats_label.setText(
-            f"Total: {stats['total']} | "
+            f"총합: {stats['total']} | "
             f"✓ {stats.get('success', 0)} | "
             f"▶ {stats.get('running', 0)} | "
             f"✗ {stats.get('fail', 0)} | "
@@ -448,19 +448,19 @@ class QualityPage(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         
-        header = SectionHeader("Quality Metrics", "데이터 품질 상세 분석")
+        header = SectionHeader("품질", "데이터 품질 상세 분석")
         layout.addWidget(header)
         
         # 품질 요약
-        summary_box = QGroupBox("Quality Summary")
+        summary_box = QGroupBox("품질 요약")
         summary_layout = QGridLayout(summary_box)
         
         self.quality_labels = {}
         labels = [
-            ("total", "Total Episodes"),
-            ("passed", "Passed"),
-            ("failed", "Failed"),
-            ("pass_rate", "Pass Rate"),
+            ("total", "전체 에피소드"),
+            ("passed", "합격"),
+            ("failed", "불합격"),
+            ("pass_rate", "합격률"),
         ]
         
         for i, (key, title) in enumerate(labels):
@@ -476,16 +476,16 @@ class QualityPage(QWidget):
         layout.addWidget(summary_box)
         
         # 상세 메트릭
-        metrics_box = QGroupBox("Detailed Metrics")
+        metrics_box = QGroupBox("상세 메트릭")
         metrics_layout = QGridLayout(metrics_box)
         
         metric_items = [
-            ("Confidence Mean", "0.85"),
-            ("Confidence Std", "0.08"),
-            ("Jitter Mean", "0.12"),
-            ("Jitter P95", "0.25"),
-            ("Episode Length Mean", "120"),
-            ("NaN Ratio Mean", "0.02"),
+            ("신뢰도 평균", "0.85"),
+            ("신뢰도 표준편차", "0.08"),
+            ("지터 평균", "0.12"),
+            ("지터 P95", "0.25"),
+            ("에피소드 길이 평균", "120"),
+            ("NaN 비율 평균", "0.02"),
         ]
         
         for i, (name, value) in enumerate(metric_items):
@@ -500,10 +500,10 @@ class QualityPage(QWidget):
         layout.addWidget(metrics_box)
         
         # 플레이스홀더: 차트 영역
-        chart_box = QGroupBox("Distribution Charts")
+        chart_box = QGroupBox("분포 차트")
         chart_layout = QVBoxLayout(chart_box)
         
-        placeholder = QLabel("📊 Charts would be rendered here using pyqtgraph or matplotlib")
+        placeholder = QLabel("📊 차트는 pyqtgraph 또는 matplotlib로 렌더링됩니다")
         placeholder.setStyleSheet(f"color: {Colors.TEXT_MUTED}; padding: 40px;")
         placeholder.setAlignment(Qt.AlignCenter)
         chart_layout.addWidget(placeholder)
@@ -536,14 +536,14 @@ class SettingsPage(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
         
-        header = SectionHeader("Settings", "대시보드 설정")
+        header = SectionHeader("설정", "대시보드 설정")
         layout.addWidget(header)
         
         # 새로고침 간격
-        refresh_box = QGroupBox("Auto Refresh")
+        refresh_box = QGroupBox("자동 새로고침")
         refresh_layout = QHBoxLayout(refresh_box)
         
-        refresh_layout.addWidget(QLabel("Interval:"))
+        refresh_layout.addWidget(QLabel("간격:"))
         self.refresh_combo = QComboBox()
         self.refresh_combo.addItems(["Off", "5s", "10s", "30s", "1m", "5m"])
         refresh_layout.addWidget(self.refresh_combo)
@@ -552,10 +552,10 @@ class SettingsPage(QWidget):
         layout.addWidget(refresh_box)
         
         # 테마
-        theme_box = QGroupBox("Theme")
+        theme_box = QGroupBox("테마")
         theme_layout = QHBoxLayout(theme_box)
         
-        theme_layout.addWidget(QLabel("Color Scheme:"))
+        theme_layout.addWidget(QLabel("색상 테마:"))
         self.theme_combo = QComboBox()
         self.theme_combo.addItems(["Dark", "Light"])
         theme_layout.addWidget(self.theme_combo)
@@ -564,10 +564,10 @@ class SettingsPage(QWidget):
         layout.addWidget(theme_box)
         
         # 알림
-        alert_box = QGroupBox("Alerts")
+        alert_box = QGroupBox("알림")
         alert_layout = QVBoxLayout(alert_box)
         
-        alert_layout.addWidget(QLabel("Alert settings would go here..."))
+        alert_layout.addWidget(QLabel("알림 설정이 여기에 표시됩니다..."))
         
         layout.addWidget(alert_box)
         

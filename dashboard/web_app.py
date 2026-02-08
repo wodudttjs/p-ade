@@ -503,13 +503,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <aside class="sidebar">
         <div class="sidebar-logo">🎬 P-ADE</div>
         <ul class="sidebar-nav">
-            <li><a href="#" class="active" data-page="overview"><i class="bi bi-graph-up"></i> Overview</a></li>
-            <li><a href="#" data-page="jobs"><i class="bi bi-list-task"></i> Jobs</a></li>
-            <li><a href="#" data-page="videos"><i class="bi bi-film"></i> Videos</a></li>
-            <li><a href="#" data-page="episodes"><i class="bi bi-collection-play"></i> Episodes</a></li>
-            <li><a href="#" data-page="quality"><i class="bi bi-award"></i> Quality</a></li>
-            <li><a href="#" data-page="ildata"><i class="bi bi-robot"></i> IL Data</a></li>
-            <li><a href="#" data-page="settings"><i class="bi bi-gear"></i> Settings</a></li>
+            <li><a href="#" class="active" data-page="overview"><i class="bi bi-graph-up"></i> 개요</a></li>
+            <li><a href="#" data-page="jobs"><i class="bi bi-list-task"></i> 작업</a></li>
+            <li><a href="#" data-page="videos"><i class="bi bi-film"></i> 비디오</a></li>
+            <li><a href="#" data-page="episodes"><i class="bi bi-collection-play"></i> 에피소드</a></li>
+            <li><a href="#" data-page="quality"><i class="bi bi-award"></i> 품질</a></li>
+            <li><a href="#" data-page="ildata"><i class="bi bi-robot"></i> IL 데이터</a></li>
+            <li><a href="#" data-page="settings"><i class="bi bi-gear"></i> 설정</a></li>
         </ul>
         <div class="sidebar-footer">
             <div class="db-status">
@@ -519,13 +519,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <div style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 11px;">v1.0.0</div>
         </div>
     </aside>
-    
     <main class="main-content">
         <header class="top-bar">
-            <h1 class="page-title" id="page-title">Overview</h1>
+            <h1 class="page-title" id="page-title">개요</h1>
             <div class="top-actions">
-                <span class="last-update" id="last-update">Last update: —</span>
-                <button class="btn-icon" onclick="refreshData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+                <span class="last-update" id="last-update">🕒 <span id="clock">--:--:--</span></span>
+                <button class="btn-icon" onclick="refreshData()" title="새로고침"><i class="bi bi-arrow-clockwise"></i></button>
             </div>
         </header>
         
@@ -534,60 +533,60 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <section class="control-panel">
                 <div class="control-grid">
                     <div class="control-box">
-                        <h4>Pipeline Control</h4>
+                        <h4>파이프라인 제어</h4>
                         <div class="form-group">
-                            <label class="form-label">Target Videos</label>
+                            <label class="form-label">대상 비디오 수</label>
                             <input type="number" class="form-control-dark" id="target-count" value="10" min="1" max="1000">
                         </div>
                         <div class="btn-group" style="margin-bottom: 10px;">
                             <button class="btn-action btn-success" id="btn-start-all" onclick="startPipeline('all')">
-                                <i class="bi bi-play-fill"></i> Run All
+                                <i class="bi bi-play-fill"></i> 모두 실행
                             </button>
                             <button class="btn-action btn-danger" id="btn-stop" onclick="stopPipeline()" disabled>
-                                <i class="bi bi-stop-fill"></i> Stop
+                                <i class="bi bi-stop-fill"></i> 중지
                             </button>
                         </div>
                         <div class="btn-group">
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('crawl')">📡 Crawl</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('download')">📥 Download</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('detect')">🔍 Detect</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('upload')">☁️ Upload</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('crawl')">📡 크롤링</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('download')">📥 다운로드</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('detect')">🔍 감지</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('upload')">☁️ 업로드</button>
                         </div>
                     </div>
                     
                     <div class="control-box">
-                        <h4>Pipeline Progress</h4>
+                        <h4>파이프라인 진행 상황</h4>
                         <div class="progress-stages">
                             <div class="stage-item">
-                                <div class="stage-label">📡 Crawl</div>
+                                <div class="stage-label">📡 크롤링</div>
                                 <div class="stage-progress"><div class="bar crawl" id="progress-crawl" style="width: 0%"></div></div>
                             </div>
                             <div class="stage-item">
-                                <div class="stage-label">📥 Download</div>
+                                <div class="stage-label">📥 다운로드</div>
                                 <div class="stage-progress"><div class="bar download" id="progress-download" style="width: 0%"></div></div>
                             </div>
                             <div class="stage-item">
-                                <div class="stage-label">🔍 Detect</div>
+                                <div class="stage-label">🔍 감지</div>
                                 <div class="stage-progress"><div class="bar detect" id="progress-detect" style="width: 0%"></div></div>
                             </div>
                             <div class="stage-item">
-                                <div class="stage-label">☁️ Upload</div>
+                                <div class="stage-label">☁️ 업로드</div>
                                 <div class="stage-progress"><div class="bar upload" id="progress-upload" style="width: 0%"></div></div>
                             </div>
                         </div>
                         <div class="total-progress"><div class="bar" id="progress-total" style="width: 0%"></div></div>
                         <div class="progress-status">
-                            <span class="label">Status:</span>
-                            <span class="value" id="pipeline-status">Ready</span>
+                            <span class="label">상태:</span>
+                            <span class="value" id="pipeline-status">준비 완료</span>
                         </div>
                     </div>
                     
                     <div class="control-box">
-                        <h4>Database Stats</h4>
-                        <div class="stat-row"><span class="stat-label">📹 Videos</span><span class="stat-value" id="stat-videos">—</span></div>
-                        <div class="stat-row"><span class="stat-label">🎬 Episodes</span><span class="stat-value" id="stat-episodes">—</span></div>
-                        <div class="stat-row"><span class="stat-label">☁️ Uploaded</span><span class="stat-value" id="stat-uploaded">—</span></div>
-                        <div class="stat-row"><span class="stat-label">💾 Storage</span><span class="stat-value" id="stat-storage">—</span></div>
+                        <h4>데이터베이스 통계</h4>
+                        <div class="stat-row"><span class="stat-label">📹 비디오</span><span class="stat-value" id="stat-videos">—</span></div>
+                        <div class="stat-row"><span class="stat-label">🎬 에피소드</span><span class="stat-value" id="stat-episodes">—</span></div>
+                        <div class="stat-row"><span class="stat-label">☁️ 업로드됨</span><span class="stat-value" id="stat-uploaded">—</span></div>
+                        <div class="stat-row"><span class="stat-label">💾 저장소</span><span class="stat-value" id="stat-storage">—</span></div>
                     </div>
                 </div>
             </section>
@@ -597,56 +596,56 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon blue"><i class="bi bi-film"></i></div>
                         <div class="value" id="card-videos">0</div>
-                        <div class="label">Total Videos</div>
+                        <div class="label">전체 비디오</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon green"><i class="bi bi-collection-play"></i></div>
                         <div class="value" id="card-episodes">0</div>
-                        <div class="label">Episodes Generated</div>
+                        <div class="label">생성된 에피소드</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon yellow"><i class="bi bi-hdd"></i></div>
                         <div class="value" id="card-storage">0 MB</div>
-                        <div class="label">Storage Used</div>
+                        <div class="label">사용 중인 저장소</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon purple"><i class="bi bi-cloud-upload"></i></div>
                         <div class="value" id="card-uploaded">0</div>
-                        <div class="label">Uploaded to S3</div>
+                        <div class="label">S3에 업로드됨</div>
                     </div>
                 </div>
                 
                 <div class="charts-grid">
                     <div class="chart-card">
-                        <h3><i class="bi bi-bar-chart"></i> Pipeline Overview</h3>
+                        <h3><i class="bi bi-bar-chart"></i> 파이프라인 개요</h3>
                         <div id="pipeline-chart" style="height: 250px; display: flex; align-items: flex-end; gap: 20px; padding: 20px;">
                             <div style="flex: 1; text-align: center;">
                                 <div style="background: var(--accent-blue); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-videos"></div>
-                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Videos</div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">비디오</div>
                             </div>
                             <div style="flex: 1; text-align: center;">
                                 <div style="background: var(--accent-purple); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-poses"></div>
-                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Poses</div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">포즈</div>
                             </div>
                             <div style="flex: 1; text-align: center;">
                                 <div style="background: var(--accent-green); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-episodes"></div>
-                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Episodes</div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">에피소드</div>
                             </div>
                             <div style="flex: 1; text-align: center;">
                                 <div style="background: var(--accent-yellow); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-uploaded"></div>
-                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Uploaded</div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">업로드됨</div>
                             </div>
                         </div>
                     </div>
                     
                     <div class="chart-card">
-                        <h3><i class="bi bi-clock-history"></i> Recent Activity</h3>
+                        <h3><i class="bi bi-clock-history"></i> 최근 활동</h3>
                         <div class="activity-list" id="activity-list">
                             <div class="activity-item">
                                 <div class="activity-icon info"><i class="bi bi-info"></i></div>
                                 <div class="activity-content">
-                                    <div class="activity-title">Dashboard started</div>
-                                    <div class="activity-time">Just now</div>
+                                    <div class="activity-title">대시보드 시작됨</div>
+                                    <div class="activity-time">방금</div>
                                 </div>
                             </div>
                         </div>
@@ -654,10 +653,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 </div>
                 
                 <div class="log-panel">
-                    <h3><i class="bi bi-terminal"></i> Pipeline Logs</h3>
+                    <h3><i class="bi bi-terminal"></i> 파이프라인 로그</h3>
                     <div class="log-content" id="log-content">
-                        <div class="log-line info">[INFO] Dashboard initialized</div>
-                        <div class="log-line">Waiting for pipeline to start...</div>
+                        <div class="log-line info">[INFO] 대시보드 초기화됨</div>
+                        <div class="log-line">파이프라인 시작 대기 중...</div>
                     </div>
                 </div>
             </section>
@@ -667,14 +666,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="page-container" id="page-jobs">
             <section class="dashboard-content">
                 <div class="chart-card">
-                    <h3><i class="bi bi-list-task"></i> Pipeline Jobs
+                    <h3><i class="bi bi-list-task"></i> 파이프라인 작업
                         <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="refreshJobs()">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                            <i class="bi bi-arrow-clockwise"></i> 새로고침
                         </button>
                     </h3>
                     <table class="data-table" id="jobs-table">
                         <thead>
-                            <tr><th>Job ID</th><th>Stage</th><th>Status</th><th>Started</th><th>Progress</th><th>Actions</th></tr>
+                            <tr><th>작업 ID</th><th>단계</th><th>상태</th><th>시작됨</th><th>진행률</th><th>작업</th></tr>
                         </thead>
                         <tbody id="jobs-tbody"></tbody>
                     </table>
@@ -686,24 +685,24 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="page-container" id="page-videos">
             <section class="dashboard-content">
                 <div class="chart-card">
-                    <h3><i class="bi bi-film"></i> Video List
+                    <h3><i class="bi bi-film"></i> 비디오 목록
                         <div style="margin-left: auto; display: flex; gap: 10px;">
                             <select class="form-control-dark" id="video-filter" style="width: 150px;" onchange="loadVideos()">
-                                <option value="">All Status</option>
-                                <option value="downloaded">Downloaded</option>
-                                <option value="processed">Processed</option>
-                                <option value="uploaded">Uploaded</option>
-                                <option value="pending">Pending</option>
-                                <option value="failed">Failed</option>
+                                <option value="">모든 상태</option>
+                                <option value="downloaded">다운로드 완료</option>
+                                <option value="processed">처리 완료</option>
+                                <option value="uploaded">업로드 완료</option>
+                                <option value="pending">대기 중</option>
+                                <option value="failed">실패</option>
                             </select>
                             <button class="btn-action btn-sm btn-danger" onclick="cleanupVideos()">
-                                <i class="bi bi-trash"></i> Cleanup
+                                <i class="bi bi-trash"></i> 정리
                             </button>
                         </div>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>ID</th><th>Title</th><th>Duration</th><th>Status</th><th>Size</th><th>Actions</th></tr>
+                            <tr><th>ID</th><th>제목</th><th>길이</th><th>상태</th><th>크기</th><th>작업</th></tr>
                         </thead>
                         <tbody id="videos-tbody"></tbody>
                     </table>
@@ -716,14 +715,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <div class="page-container" id="page-episodes">
             <section class="dashboard-content">
                 <div class="chart-card">
-                    <h3><i class="bi bi-collection-play"></i> Episodes
+                    <h3><i class="bi bi-collection-play"></i> 에피소드
                         <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="loadEpisodes()">
-                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                            <i class="bi bi-arrow-clockwise"></i> 새로고침
                         </button>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>Filename</th><th>Video ID</th><th>Size</th><th>Created</th><th>Actions</th></tr>
+                            <tr><th>파일명</th><th>비디오 ID</th><th>크기</th><th>생성일</th><th>작업</th></tr>
                         </thead>
                         <tbody id="episodes-tbody"></tbody>
                     </table>
@@ -738,29 +737,29 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon green"><i class="bi bi-check-circle"></i></div>
                         <div class="value" id="quality-passed">0</div>
-                        <div class="label">Quality Passed</div>
+                        <div class="label">품질 통과</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon purple"><i class="bi bi-x-circle"></i></div>
                         <div class="value" id="quality-failed">0</div>
-                        <div class="label">Quality Failed</div>
+                        <div class="label">품질 실패</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon blue"><i class="bi bi-speedometer2"></i></div>
                         <div class="value" id="quality-avg">—</div>
-                        <div class="label">Avg Quality Score</div>
+                        <div class="label">평균 품질 점수</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon yellow"><i class="bi bi-percent"></i></div>
                         <div class="value" id="quality-rate">—</div>
-                        <div class="label">Success Rate</div>
+                        <div class="label">성공률</div>
                     </div>
                 </div>
                 
                 <div class="chart-card">
-                    <h3><i class="bi bi-file-text"></i> Quality Report</h3>
+                    <h3><i class="bi bi-file-text"></i> 품질 보고서</h3>
                     <div id="quality-report" style="padding: 20px;">
-                        <p style="color: var(--text-secondary);">Loading quality report...</p>
+                        <p style="color: var(--text-secondary);">품질 보고서 로드 중...</p>
                     </div>
                 </div>
             </section>
@@ -771,40 +770,40 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <section class="dashboard-content">
                 <div class="settings-grid">
                     <div class="settings-section">
-                        <h3><i class="bi bi-gear"></i> General Settings</h3>
+                        <h3><i class="bi bi-gear"></i> 일반 설정</h3>
                         <div class="form-group">
-                            <label class="form-label">Auto Refresh</label>
+                            <label class="form-label">자동 새로고침</label>
                             <select class="form-control-dark" id="setting-auto-refresh">
-                                <option value="true">Enabled</option>
-                                <option value="false">Disabled</option>
+                                <option value="true">활성화</option>
+                                <option value="false">비활성화</option>
                             </select>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Refresh Interval (seconds)</label>
+                            <label class="form-label">새로고침 간격 (초)</label>
                             <input type="number" class="form-control-dark" id="setting-refresh-interval" value="5" min="1" max="60">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Max Workers</label>
+                            <label class="form-label">최대 작업자 수</label>
                             <input type="number" class="form-control-dark" id="setting-max-workers" value="4" min="1" max="16">
                         </div>
                     </div>
                     
                     <div class="settings-section">
-                        <h3><i class="bi bi-cloud"></i> S3 Settings</h3>
+                        <h3><i class="bi bi-cloud"></i> S3 설정</h3>
                         <div class="form-group">
-                            <label class="form-label">S3 Bucket Name</label>
+                            <label class="form-label">S3 버킷 이름</label>
                             <input type="text" class="form-control-dark" id="setting-s3-bucket" placeholder="p-ade-data">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">AWS Region</label>
+                            <label class="form-label">AWS 리전</label>
                             <input type="text" class="form-control-dark" id="setting-aws-region" value="ap-northeast-2">
                         </div>
                     </div>
                     
                     <div class="settings-section">
-                        <h3><i class="bi bi-download"></i> Download Settings</h3>
+                        <h3><i class="bi bi-download"></i> 다운로드 설정</h3>
                         <div class="form-group">
-                            <label class="form-label">Video Quality</label>
+                            <label class="form-label">비디오 품질</label>
                             <select class="form-control-dark" id="setting-quality">
                                 <option value="360p">360p</option>
                                 <option value="480p">480p</option>
@@ -813,19 +812,19 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             </select>
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Max Duration (minutes)</label>
+                            <label class="form-label">최대 길이 (분)</label>
                             <input type="number" class="form-control-dark" id="setting-max-duration" value="30" min="1" max="120">
                         </div>
                     </div>
                     
                     <div class="settings-section">
-                        <h3><i class="bi bi-eye"></i> Detection Settings</h3>
+                        <h3><i class="bi bi-eye"></i> 감지 설정</h3>
                         <div class="form-group">
-                            <label class="form-label">Confidence Threshold</label>
+                            <label class="form-label">신뢰도 임계값</label>
                             <input type="number" class="form-control-dark" id="setting-confidence" value="0.5" min="0.1" max="1.0" step="0.1">
                         </div>
                         <div class="form-group">
-                            <label class="form-label">Detection Model</label>
+                            <label class="form-label">감지 모델</label>
                             <select class="form-control-dark" id="setting-model">
                                 <option value="yolov8n">YOLOv8 Nano</option>
                                 <option value="yolov8s">YOLOv8 Small</option>
@@ -837,7 +836,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 
                 <div style="margin-top: 20px; text-align: right;">
                     <button class="btn-action btn-success" onclick="saveSettings()">
-                        <i class="bi bi-check-lg"></i> Save Settings
+                        <i class="bi bi-check-lg"></i> 설정 저장
                     </button>
                 </div>
             </section>
@@ -850,22 +849,22 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon blue"><i class="bi bi-robot"></i></div>
                         <div class="value" id="il-total">0</div>
-                        <div class="label">IL Episodes</div>
+                        <div class="label">IL 에피소드</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon green"><i class="bi bi-check-circle"></i></div>
                         <div class="value" id="il-ready">0</div>
-                        <div class="label">Training Ready</div>
+                        <div class="label">훈련 준비 완료</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon yellow"><i class="bi bi-layers"></i></div>
                         <div class="value" id="il-state-dim">—</div>
-                        <div class="label">State Dim</div>
+                        <div class="label">상태 차원</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon purple"><i class="bi bi-joystick"></i></div>
                         <div class="value" id="il-action-dim">—</div>
-                        <div class="label">Action Dim</div>
+                        <div class="label">행동 차원</div>
                     </div>
                 </div>
                 
@@ -873,50 +872,50 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon blue"><i class="bi bi-film"></i></div>
                         <div class="value" id="il-total-frames">0</div>
-                        <div class="label">Total Frames</div>
+                        <div class="label">전체 프레임</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon green"><i class="bi bi-hand-index"></i></div>
                         <div class="value" id="il-avg-gripper">—</div>
-                        <div class="label">Avg Gripper</div>
+                        <div class="label">평균 그리퍼</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon yellow"><i class="bi bi-eye"></i></div>
                         <div class="value" id="il-avg-conf">—</div>
-                        <div class="label">Avg Confidence</div>
+                        <div class="label">평균 신뢰도</div>
                     </div>
                 </div>
                 
                 <div class="charts-grid">
                     <div class="chart-card">
-                        <h3><i class="bi bi-bar-chart"></i> Data Distribution</h3>
+                        <h3><i class="bi bi-bar-chart"></i> 데이터 분포</h3>
                         <div id="il-distribution" style="padding: 20px;">
                             <div style="display: flex; gap: 20px; align-items: flex-end; height: 200px;" id="il-dist-bars"></div>
                         </div>
                     </div>
                     
                     <div class="chart-card">
-                        <h3><i class="bi bi-clipboard-data"></i> Data Quality Summary</h3>
+                        <h3><i class="bi bi-clipboard-data"></i> 데이터 품질 요약</h3>
                         <div id="il-quality-summary" style="padding: 20px;">
-                            <p style="color: var(--text-secondary);">Loading...</p>
+                            <p style="color: var(--text-secondary);">로딩 중...</p>
                         </div>
                     </div>
                 </div>
                 
                 <div class="chart-card">
-                    <h3><i class="bi bi-table"></i> IL Episodes
+                    <h3><i class="bi bi-table"></i> IL 에피소드
                         <div style="margin-left: auto; display: flex; gap: 10px;">
                             <button class="btn-action btn-sm btn-primary" onclick="loadILData()">
-                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                                <i class="bi bi-arrow-clockwise"></i> 새로고침
                             </button>
                             <button class="btn-action btn-sm btn-success" onclick="runBuildIL()">
-                                <i class="bi bi-play-fill"></i> Build IL Data
+                                <i class="bi bi-play-fill"></i> IL 데이터 생성
                             </button>
                         </div>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>Video ID</th><th>Frames</th><th>State</th><th>Action</th><th>Confidence</th><th>Gripper</th><th>Size</th></tr>
+                            <tr><th>비디오 ID</th><th>프레임 수</th><th>상태</th><th>행동</th><th>신뢰도</th><th>그리퍼</th><th>크기</th></tr>
                         </thead>
                         <tbody id="ildata-tbody"></tbody>
                     </table>
@@ -929,13 +928,13 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <div class="modal-overlay" id="modal">
         <div class="modal-content">
             <div class="modal-header">
-                <h3 class="modal-title" id="modal-title">Confirm</h3>
+                <h3 class="modal-title" id="modal-title">확인</h3>
                 <button class="modal-close" onclick="closeModal()">&times;</button>
             </div>
             <div id="modal-body"></div>
             <div style="margin-top: 20px; text-align: right;">
-                <button class="btn-action btn-secondary" onclick="closeModal()">Cancel</button>
-                <button class="btn-action btn-primary" id="modal-confirm" onclick="confirmModal()">Confirm</button>
+                <button class="btn-action btn-secondary" onclick="closeModal()">취소</button>
+                <button class="btn-action btn-primary" id="modal-confirm" onclick="confirmModal()">확인</button>
             </div>
         </div>
     </div>
@@ -997,10 +996,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const statusText = document.getElementById('db-status-text');
                 if (stats.db.connected) {
                     statusDot.classList.add('connected');
-                    statusText.textContent = 'DB Connected';
+                    statusText.textContent = 'DB 연결됨';
                 } else {
                     statusDot.classList.remove('connected');
-                    statusText.textContent = 'DB Disconnected';
+                    statusText.textContent = 'DB 연결 끊김';
                 }
                 
                 document.getElementById('stat-videos').textContent = stats.files.raw_videos;
@@ -1019,7 +1018,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 document.getElementById('chart-bar-episodes').style.height = `${(stats.files.episodes / maxVal) * 180}px`;
                 document.getElementById('chart-bar-uploaded').style.height = `${((stats.files.uploaded || 0) / maxVal) * 180}px`;
                 
-                document.getElementById('last-update').textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+                document.getElementById('last-update').textContent = `마지막 업데이트: ${new Date().toLocaleTimeString()}`;
                 
                 isRunning = pipeline.is_running;
                 updatePipelineUI(pipeline);
@@ -1041,9 +1040,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('progress-total').style.width = `${total}%`;
             
             let status = 'Ready';
-            if (pipeline.is_running) status = `Running: ${pipeline.current_stage || 'Initializing...'}`;
-            else if (total > 0 && total < 100) status = 'Paused';
-            else if (total >= 100) status = 'Completed';
+            if (pipeline.is_running) status = `실행 중: ${pipeline.current_stage || '초기화 중...'}`;
+            else if (total > 0 && total < 100) status = '일시 중지';
+            else if (total >= 100) status = '완료';
             document.getElementById('pipeline-status').textContent = status;
             
             if (pipeline.logs && pipeline.logs.length > 0) {
@@ -1069,28 +1068,28 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         async function startPipeline(stage) {
             const target = document.getElementById('target-count').value;
             try {
-                addActivity('info', `Starting pipeline: ${stage}...`);
+                addActivity('info', `파이프라인 시작: ${stage}...`);
                 const res = await fetch(`${API_BASE}/api/pipeline/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ target_count: parseInt(target), stage: stage })
                 });
                 const result = await res.json();
-                if (result.success) addActivity('success', `Pipeline ${stage} started`);
-                else addActivity('warning', `Failed: ${result.message}`);
+                if (result.success) addActivity('success', `파이프라인 ${stage} 시작됨`);
+                else addActivity('warning', `실패: ${result.message}`);
                 refreshData();
             } catch (error) {
                 console.error('Error starting pipeline:', error);
-                addActivity('error', 'Error starting pipeline');
+                addActivity('error', '파이프라인 시작 중 오류 발생');
             }
         }
         
         async function stopPipeline() {
             try {
-                addActivity('warning', 'Stopping pipeline...');
+                addActivity('warning', '파이프라인 중지 중...');
                 const res = await fetch(`${API_BASE}/api/pipeline/stop`, { method: 'POST' });
                 const result = await res.json();
-                if (result.success) addActivity('info', 'Pipeline stopped');
+                if (result.success) addActivity('info', '파이프라인 중지됨');
                 refreshData();
             } catch (error) {
                 console.error('Error stopping pipeline:', error);
@@ -1103,7 +1102,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const jobs = await res.json();
                 const tbody = document.getElementById('jobs-tbody');
                 if (jobs.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No jobs found</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">작업이 없습니다</td></tr>';
                     return;
                 }
                 tbody.innerHTML = jobs.map(job => `
@@ -1113,7 +1112,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td><span class="badge badge-${job.status === 'completed' ? 'success' : job.status === 'running' ? 'info' : job.status === 'failed' ? 'danger' : 'secondary'}">${job.status}</span></td>
                         <td>${job.started_at || '—'}</td>
                         <td>${job.progress}%</td>
-                        <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">Logs</button></td>
+                        <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">로그</button></td>
                     </tr>
                 `).join('');
             } catch (error) {
@@ -1122,7 +1121,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         
         function viewJobLogs(jobId) {
-            showModal('Job Logs', `<div class="log-content" style="max-height: 300px;">Loading logs for job ${jobId}...</div>`);
+            showModal('작업 로그', `<div class="log-content" style="max-height: 300px;">작업 ${jobId}의 로그 로드 중...</div>`);
         }
         
         async function loadVideos() {
@@ -1132,7 +1131,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const data = await res.json();
                 const tbody = document.getElementById('videos-tbody');
                 if (data.videos.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No videos found</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">비디오가 없습니다</td></tr>';
                     return;
                 }
                 tbody.innerHTML = data.videos.map(v => `
@@ -1145,29 +1144,29 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td><button class="btn-action btn-sm btn-danger" onclick="deleteVideo(${v.id})"><i class="bi bi-trash"></i></button></td>
                     </tr>
                 `).join('');
-                document.getElementById('videos-pagination').textContent = `Showing ${data.videos.length} of ${data.total} videos`;
+                document.getElementById('videos-pagination').textContent = `총 ${data.total}개의 비디오 중 ${data.videos.length}개 표시`;
             } catch (error) {
                 console.error('Error loading videos:', error);
             }
         }
         
         async function deleteVideo(id) {
-            if (!confirm('Are you sure you want to delete this video?')) return;
+            if (!confirm('이 비디오를 삭제하시겠습니까?')) return;
             try {
                 await fetch(`${API_BASE}/api/videos/${id}`, { method: 'DELETE' });
                 loadVideos();
-                addActivity('success', `Video ${id} deleted`);
+                addActivity('success', `비디오 ${id} 삭제됨`);
             } catch (error) {
                 console.error('Error deleting video:', error);
             }
         }
         
         async function cleanupVideos() {
-            if (!confirm('This will delete all failed/orphaned video files. Continue?')) return;
+            if (!confirm('실패한/고아 비디오 파일이 삭제됩니다. 계속하시겠습니까?')) return;
             try {
                 const res = await fetch(`${API_BASE}/api/cleanup`, { method: 'POST' });
                 const result = await res.json();
-                addActivity('success', `Cleanup completed: ${result.deleted} files removed`);
+                addActivity('success', `정리 완료: ${result.deleted} 개의 파일이 제거됨`);
                 loadVideos();
                 refreshData();
             } catch (error) {
@@ -1181,7 +1180,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const episodes = await res.json();
                 const tbody = document.getElementById('episodes-tbody');
                 if (episodes.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">No episodes found</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">에피소드가 없습니다</td></tr>';
                     return;
                 }
                 tbody.innerHTML = episodes.map(e => `
@@ -1206,11 +1205,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         
         async function deleteEpisode(filename) {
-            if (!confirm(`Delete episode ${filename}?`)) return;
+            if (!confirm(`에피소드 ${filename}를 삭제하시겠습니까?`)) return;
             try {
                 await fetch(`${API_BASE}/api/episodes/${filename}`, { method: 'DELETE' });
                 loadEpisodes();
-                addActivity('success', `Episode deleted: ${filename}`);
+                addActivity('success', `에피소드 삭제됨: ${filename}`);
             } catch (error) {
                 console.error('Error deleting episode:', error);
             }
@@ -1228,7 +1227,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 if (data.report) {
                     report.innerHTML = `<pre style="color: var(--text-primary); white-space: pre-wrap;">${escapeHtml(JSON.stringify(data.report, null, 2))}</pre>`;
                 } else {
-                    report.innerHTML = '<p style="color: var(--text-secondary);">No quality report available</p>';
+                    report.innerHTML = '<p style="color: var(--text-secondary);">품질 보고서가 없습니다</p>';
                 }
             } catch (error) {
                 console.error('Error loading quality:', error);
@@ -1265,7 +1264,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(settings)
                 });
-                if (res.ok) addActivity('success', 'Settings saved');
+                if (res.ok) addActivity('success', '설정 저장됨');
             } catch (error) {
                 console.error('Error saving settings:', error);
             }
@@ -1318,7 +1317,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 document.getElementById('il-avg-gripper').textContent = data.avg_gripper != null ? data.avg_gripper.toFixed(3) : '—';
                 document.getElementById('il-avg-conf').textContent = data.avg_confidence != null ? data.avg_confidence.toFixed(3) : '—';
                 
-                // Distribution bars
+                // 분포 막대
                 const distBars = document.getElementById('il-dist-bars');
                 if (data.distribution) {
                     const maxVal = Math.max(...Object.values(data.distribution), 1);
@@ -1335,23 +1334,23 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     }).join('');
                 }
                 
-                // Quality summary
+                // 품질 요약
                 const qs = document.getElementById('il-quality-summary');
                 if (data.quality) {
                     const q = data.quality;
                     qs.innerHTML = `
                         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-                            <div class="stat-row"><span class="stat-label">States range</span><span class="stat-value">[${q.states_min?.toFixed(2)}, ${q.states_max?.toFixed(2)}]</span></div>
-                            <div class="stat-row"><span class="stat-label">Actions range</span><span class="stat-value">[${q.actions_min?.toFixed(2)}, ${q.actions_max?.toFixed(2)}]</span></div>
-                            <div class="stat-row"><span class="stat-label">States std</span><span class="stat-value">${q.states_std?.toFixed(4)}</span></div>
-                            <div class="stat-row"><span class="stat-label">Actions std</span><span class="stat-value">${q.actions_std?.toFixed(4)}</span></div>
-                            <div class="stat-row"><span class="stat-label">Avg frames/ep</span><span class="stat-value">${q.avg_frames?.toFixed(1)}</span></div>
-                            <div class="stat-row"><span class="stat-label">Legacy (no IL)</span><span class="stat-value">${data.legacy || 0}</span></div>
+                            <div class="stat-row"><span class="stat-label">상태 범위</span><span class="stat-value">[${q.states_min?.toFixed(2)}, ${q.states_max?.toFixed(2)}]</span></div>
+                            <div class="stat-row"><span class="stat-label">행동 범위</span><span class="stat-value">[${q.actions_min?.toFixed(2)}, ${q.actions_max?.toFixed(2)}]</span></div>
+                            <div class="stat-row"><span class="stat-label">상태 표준편차</span><span class="stat-value">${q.states_std?.toFixed(4)}</span></div>
+                            <div class="stat-row"><span class="stat-label">행동 표준편차</span><span class="stat-value">${q.actions_std?.toFixed(4)}</span></div>
+                            <div class="stat-row"><span class="stat-label">에피소드당 평균 프레임</span><span class="stat-value">${q.avg_frames?.toFixed(1)}</span></div>
+                            <div class="stat-row"><span class="stat-label">레거시 (IL 없음)</span><span class="stat-value">${data.legacy || 0}</span></div>
                         </div>
                     `;
                 }
                 
-                // Episodes table
+                // 에피소드 테이블
                 const tbody = document.getElementById('ildata-tbody');
                 if (data.episodes && data.episodes.length > 0) {
                     tbody.innerHTML = data.episodes.map(ep => `<tr>
@@ -1364,31 +1363,42 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td>${ep.size_kb} KB</td>
                     </tr>`).join('');
                 } else {
-                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">No IL data found. Click "Build IL Data" to generate.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-secondary);">IL 데이터가 없습니다. "IL 데이터 생성"을 클릭하여 생성하세요.</td></tr>';
                 }
                 
-                document.getElementById('il-pagination').textContent = `Showing ${(data.episodes||[]).length} of ${data.total} IL episodes`;
+                document.getElementById('il-pagination').textContent = `총 ${data.total} IL 에피소드 중 ${data.episodes.length}개 표시`;
             } catch (error) {
                 console.error('Error loading IL data:', error);
             }
         }
         
         async function runBuildIL() {
-            showModal('Build IL Data', '<p>Run build_imitation_data.py to generate Imitation Learning data from all videos?</p><p style="color:var(--text-secondary);font-size:13px;">This may take a while depending on the number of videos.</p>', async () => {
+            showModal('IL 데이터 생성', '<p>모든 비디오에서 모방 학습 데이터를 생성하기 위해 build_imitation_data.py를 실행합니다.</p><p style="color:var(--text-secondary);font-size:13px;">비디오 수에 따라 시간이 걸릴 수 있습니다.</p>', async () => {
                 try {
-                    addActivity('info', 'Starting IL data build...');
+                    addActivity('info', 'IL 데이터 생성 시작...');
                     const res = await fetch(`${API_BASE}/api/ildata/build`, {method: 'POST'});
                     const data = await res.json();
                     if (data.success) {
-                        addActivity('success', data.message || 'IL build started');
+                        addActivity('success', data.message || 'IL 데이터 생성 시작됨');
                     } else {
-                        addActivity('error', data.error || 'IL build failed');
+                        addActivity('error', data.error || 'IL 데이터 생성 실패');
                     }
                 } catch (error) {
-                    addActivity('error', 'Failed to start IL build');
+                    addActivity('error', 'IL 데이터 생성 시작 실패');
                 }
             });
         }
+        
+        // 실시간 시계
+        function updateClock() {
+            const now = new Date();
+            const h = String(now.getHours()).padStart(2, '0');
+            const m = String(now.getMinutes()).padStart(2, '0');
+            const s = String(now.getSeconds()).padStart(2, '0');
+            document.getElementById('clock').textContent = `${h}:${m}:${s}`;
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
     </script>
 </body>
 </html>'''
@@ -1482,34 +1492,34 @@ def api_pipeline_start():
                     if line:
                         pipeline_state["logs"].append(line)
                     if not pipeline_state["is_running"]:
-                        proc.terminate()
+                        proc.terminate();
                         break
                 
-                proc.wait()
-                pipeline_state["progress"][current_stage] = 100
+                proc.wait();
+                pipeline_state["progress"][current_stage] = 100;
                 
                 # 작업 진행률 업데이트
                 completed_stages = sum(1 for s in stages if pipeline_state["progress"].get(s, 0) >= 100)
-                job["progress"] = int(completed_stages / len(stages) * 100)
+                job["progress"] = int(completed_stages / len(stages) * 100);
             
             if pipeline_state["is_running"]:
-                pipeline_state["logs"].append("[SUCCESS] ✅ Pipeline completed!")
-                job["status"] = "completed"
-                job["progress"] = 100
+                pipeline_state["logs"].append("[SUCCESS] ✅ Pipeline completed!");
+                job["status"] = "completed";
+                job["progress"] = 100;
             else:
-                job["status"] = "stopped"
+                job["status"] = "stopped";
             
         except Exception as e:
-            pipeline_state["logs"].append(f"[ERROR] {e}")
-            job["status"] = "failed"
+            pipeline_state["logs"].append(f"[ERROR] {e}");
+            job["status"] = "failed";
         
         finally:
-            pipeline_state["is_running"] = False
-            pipeline_state["current_stage"] = None
-            pipeline_state["process"] = None
+            pipeline_state["is_running"] = False;
+            pipeline_state["current_stage"] = None;
+            pipeline_state["process"] = None;
     
-    thread = threading.Thread(target=run_pipeline, daemon=True)
-    thread.start()
+    thread = threading.Thread(target=run_pipeline, daemon=True);
+    thread.start();
     
     return jsonify({"success": True, "message": f"Pipeline started: {stage}"})
 
@@ -1684,37 +1694,37 @@ def api_quality():
         "avg_score": 0,
         "success_rate": 0,
         "report": None
-    }
+    };
     
-    conn = get_db_connection()
+    conn = get_db_connection();
     if conn:
         try:
             cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
             result["passed"] = cur.fetchone()[0]
-            
+
             cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'failed'")
             result["failed"] = cur.fetchone()[0]
-            
+
             total = result["passed"] + result["failed"]
             if total > 0:
                 result["success_rate"] = (result["passed"] / total) * 100
-            
+
             cur = conn.execute("SELECT AVG(quality_score) FROM videos WHERE quality_score IS NOT NULL")
             avg = cur.fetchone()[0]
             result["avg_score"] = avg if avg else 0
-            
+
             conn.close()
-        except:
+        except Exception:
             pass
-    
+
     # 품질 보고서 로드
     if quality_report_path.exists():
         try:
             with open(quality_report_path, "r") as f:
                 result["report"] = json.load(f)
-        except:
+        except Exception:
             pass
-    
+
     return jsonify(result)
 
 
@@ -1760,8 +1770,8 @@ def api_ildata():
     all_conf = []
     all_states_min, all_states_max, all_states_std = [], [], []
     all_actions_min, all_actions_max, all_actions_std = [], [], []
-    has_states = 0
-    has_hands = 0
+    has_states = 0;
+    has_hands = 0;
     
     for f in npz_files:
         try:
@@ -1866,13 +1876,14 @@ def api_build_ildata():
                     if len(pipeline_state["logs"]) > 500:
                         pipeline_state["logs"] = pipeline_state["logs"][-300:]
         
-        t = threading.Thread(target=monitor_build, daemon=True)
-        t.start()
+        t = threading.Thread(target=monitor_build, daemon=True);
+        t.start();
         
-        return jsonify({"success": True, "message": "IL data build started in background"})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
+        return jsonify({"success": True, "message": "IL 데이터 생성 시작됨"});
+    except Exception:
+        pass
+    return jsonify({"success": False, "error": "Unknown error"})
+    
 
 # ============================================================================
 # Main

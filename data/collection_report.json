@@ -1,8 +1,8 @@
 {
-  "started_at": "2026-02-08T02:42:28.543202",
-  "completed_at": "2026-02-08T02:44:04.687136",
+  "started_at": "2026-02-08T20:38:19.562403",
+  "completed_at": "2026-02-08T20:38:47.322821",
   "config": {
-    "target_count": 1,
+    "target_count": 10,
     "sources": [
       "youtube",
       "google_videos"
@@ -35,20 +35,21 @@
   },
   "stages": [
     {
-      "stage": "upload",
+      "stage": "detect",
       "success": true,
-      "count": 454,
+      "count": 0,
       "errors": 0,
-      "elapsed_sec": 96.14317607879639,
+      "elapsed_sec": 27.662843465805054,
       "details": {
-        "bucket": "p-ade-datasets",
-        "prefix": "episodes"
+        "total_episodes": 466,
+        "new_episodes": 0,
+        "device": "auto"
       }
     }
   ],
   "total_crawled": 0,
   "total_downloaded": 0,
-  "total_episodes": 0,
-  "total_uploaded": 454,
-  "total_elapsed_sec": 96.14390897750854
+  "total_episodes": 466,
+  "total_uploaded": 0,
+  "total_elapsed_sec": 27.760393381118774
 }

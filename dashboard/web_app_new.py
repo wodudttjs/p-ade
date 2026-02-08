@@ -1,0 +1,1594 @@
+#!/usr/bin/env python3
+"""
+P-ADE 웹 대시보드 (Full Featured)
+
+Flask 기반 웹 대시보드
+- 실시간 파이프라인 모니터링
+- DB 통계 시각화
+- 파이프라인 제어 (Start/Stop)
+- Jobs/Quality/Settings 페이지
+- 개별 스테이지 실행
+- 비디오/에피소드 목록 조회
+"""
+
+import os
+import sys
+import json
+import sqlite3
+import subprocess
+import threading
+import shutil
+from pathlib import Path
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+from flask import Flask, render_template_string, jsonify, request, send_file
+from flask_cors import CORS
+
+# 프로젝트 루트 설정
+PROJECT_ROOT = Path(__file__).parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# ============================================================================
+# Flask App
+# ============================================================================
+
+app = Flask(__name__)
+CORS(app)
+
+# 전역 상태
+pipeline_state = {
+    "is_running": False,
+    "current_stage": None,
+    "progress": {
+        "crawl": 0,
+        "download": 0,
+        "detect": 0,
+        "upload": 0,
+    },
+    "logs": [],
+    "started_at": None,
+    "process": None,
+    "target_count": 0,
+    "processed_count": 0,
+}
+
+# 설정 상태
+settings_state = {
+    "auto_refresh": True,
+    "refresh_interval": 5,
+    "max_workers": 4,
+    "s3_bucket": os.environ.get("S3_BUCKET_NAME", "p-ade-data"),
+    "download_quality": "720p",
+    "detect_confidence": 0.5,
+}
+
+# 작업 히스토리
+jobs_history = []
+
+
+def get_db_connection():
+    """SQLite DB 연결"""
+    db_path = PROJECT_ROOT / "data" / "pade.db"
+    if db_path.exists():
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+    return None
+
+
+def get_file_stats() -> Dict[str, int]:
+    """파일 기반 통계"""
+    data_dir = PROJECT_ROOT / "data"
+    stats = {
+        "raw_videos": 0,
+        "episodes": 0,
+        "poses": 0,
+        "total_size_mb": 0,
+        "uploaded": 0,
+    }
+    
+    try:
+        raw_dir = data_dir / "raw"
+        if raw_dir.exists():
+            mp4_files = list(raw_dir.glob("*.mp4"))
+            stats["raw_videos"] = len(mp4_files)
+            stats["total_size_mb"] += sum(f.stat().st_size for f in mp4_files) / (1024 * 1024)
+        
+        episodes_dir = data_dir / "episodes"
+        if episodes_dir.exists():
+            npz_files = list(episodes_dir.glob("*.npz"))
+            stats["episodes"] = len(npz_files)
+            stats["total_size_mb"] += sum(f.stat().st_size for f in npz_files) / (1024 * 1024)
+        
+        poses_dir = data_dir / "poses"
+        if poses_dir.exists():
+            stats["poses"] = len(list(poses_dir.glob("*.npz")))
+        
+        # DB에서 업로드된 개수 확인
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
+                stats["uploaded"] = cur.fetchone()[0]
+            except:
+                pass
+            finally:
+                conn.close()
+    except Exception:
+        pass
+    
+    return stats
+
+
+def get_db_stats() -> Dict[str, Any]:
+    """DB 통계"""
+    conn = get_db_connection()
+    if not conn:
+        return {"connected": False}
+    
+    try:
+        stats = {"connected": True}
+        
+        # 비디오 통계
+        cur = conn.execute("SELECT COUNT(*) FROM videos")
+        stats["total_videos"] = cur.fetchone()[0]
+        
+        # 상태별 카운트
+        cur = conn.execute("""
+            SELECT status, COUNT(*) as cnt FROM videos GROUP BY status
+        """)
+        status_counts = {row["status"]: row["cnt"] for row in cur.fetchall()}
+        stats["status_counts"] = status_counts
+        
+        # 큐 깊이 (pending 상태)
+        stats["queue_depth"] = status_counts.get("pending", 0) + status_counts.get("queued", 0)
+        
+        # 평균 품질 점수
+        try:
+            cur = conn.execute("SELECT AVG(quality_score) FROM videos WHERE quality_score IS NOT NULL")
+            avg = cur.fetchone()[0]
+            stats["avg_quality"] = round(avg, 2) if avg else 0
+        except:
+            stats["avg_quality"] = 0
+        
+        # 저장소 크기
+        stats["storage_gb"] = round(get_file_stats()["total_size_mb"] / 1024, 2)
+        
+        conn.close()
+        return stats
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+# ============================================================================
+# HTML Template
+# ============================================================================
+
+HTML_TEMPLATE = '''<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P-ADE Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0d1117;
+            --bg-card: #161b22;
+            --bg-hover: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-blue: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-yellow: #d29922;
+            --accent-red: #f85149;
+            --accent-purple: #a371f7;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+        .sidebar {
+            position: fixed;
+            left: 0; top: 0;
+            width: 220px;
+            height: 100vh;
+            background: var(--bg-card);
+            border-right: 1px solid var(--border-color);
+            padding: 20px 0;
+            z-index: 1000;
+        }
+        .sidebar-logo {
+            padding: 0 20px 20px;
+            font-size: 24px;
+            font-weight: 800;
+            color: var(--accent-blue);
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+        .sidebar-nav { list-style: none; }
+        .sidebar-nav li a {
+            display: flex;
+            align-items: center;
+            padding: 12px 20px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            transition: all 0.2s;
+        }
+        .sidebar-nav li a:hover, .sidebar-nav li a.active {
+            background: var(--bg-hover);
+            color: var(--text-primary);
+            border-left: 3px solid var(--accent-blue);
+        }
+        .sidebar-nav li a i { margin-right: 12px; font-size: 18px; }
+        .sidebar-footer {
+            position: absolute;
+            bottom: 20px;
+            left: 0; right: 0;
+            padding: 0 20px;
+        }
+        .db-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: var(--bg-dark);
+            border-radius: 8px;
+            font-size: 12px;
+        }
+        .status-dot {
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--accent-red);
+        }
+        .status-dot.connected { background: var(--accent-green); }
+        .main-content { margin-left: 220px; min-height: 100vh; }
+        .top-bar {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 15px 30px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .page-title { font-size: 20px; font-weight: 600; }
+        .top-actions { display: flex; gap: 10px; align-items: center; }
+        .last-update { color: var(--text-secondary); font-size: 13px; }
+        .btn-icon {
+            width: 36px; height: 36px;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+            background: var(--bg-dark);
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .btn-icon:hover { background: var(--bg-hover); border-color: var(--accent-blue); }
+        .page-container { display: none; }
+        .page-container.active { display: block; }
+        .control-panel {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 20px 30px;
+        }
+        .control-grid {
+            display: grid;
+            grid-template-columns: 280px 1fr 220px;
+            gap: 20px;
+        }
+        .control-box {
+            background: var(--bg-dark);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 16px;
+        }
+        .control-box h4 {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .btn-action {
+            padding: 10px 16px;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-action:hover { filter: brightness(1.1); }
+        .btn-action:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: var(--accent-blue); color: #fff; }
+        .btn-success { background: var(--accent-green); color: #fff; }
+        .btn-danger { background: var(--accent-red); color: #fff; }
+        .btn-warning { background: var(--accent-yellow); color: #000; }
+        .btn-secondary { background: var(--bg-hover); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+        .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+        .form-control-dark {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            border-radius: 6px;
+            padding: 8px 12px;
+            width: 100%;
+        }
+        .form-control-dark:focus {
+            background: var(--bg-card);
+            border-color: var(--accent-blue);
+            color: var(--text-primary);
+            box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.2);
+            outline: none;
+        }
+        .form-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; display: block; }
+        .form-group { margin-bottom: 12px; }
+        .progress-stages {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stage-item { text-align: center; }
+        .stage-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
+        .stage-progress {
+            height: 8px;
+            background: var(--bg-card);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .stage-progress .bar {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+        .stage-progress .bar.crawl { background: var(--accent-blue); }
+        .stage-progress .bar.download { background: var(--accent-purple); }
+        .stage-progress .bar.detect { background: var(--accent-yellow); }
+        .stage-progress .bar.upload { background: var(--accent-green); }
+        .total-progress {
+            height: 12px;
+            background: var(--bg-card);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .total-progress .bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent-blue), var(--accent-green));
+            border-radius: 6px;
+            transition: width 0.3s ease;
+        }
+        .progress-status { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
+        .progress-status .label { color: var(--text-secondary); }
+        .progress-status .value { font-weight: 600; }
+        .stat-row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--border-color); }
+        .stat-row:last-child { border-bottom: none; }
+        .stat-label { color: var(--text-secondary); font-size: 13px; }
+        .stat-value { font-weight: 600; color: var(--accent-blue); }
+        .dashboard-content { padding: 30px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 20px; margin-bottom: 30px; }
+        .stat-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .stat-card .icon {
+            width: 48px; height: 48px;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+        .stat-card .icon.blue { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+        .stat-card .icon.green { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+        .stat-card .icon.yellow { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+        .stat-card .icon.purple { background: rgba(163, 113, 247, 0.15); color: var(--accent-purple); }
+        .stat-card .value { font-size: 32px; font-weight: 700; margin-bottom: 5px; }
+        .stat-card .label { color: var(--text-secondary); font-size: 14px; }
+        .charts-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; margin-bottom: 30px; }
+        .chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .chart-card h3 { font-size: 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+        .data-table { width: 100%; border-collapse: collapse; }
+        .data-table th, .data-table td { padding: 12px; text-align: left; border-bottom: 1px solid var(--border-color); }
+        .data-table th { background: var(--bg-dark); color: var(--text-secondary); font-size: 12px; text-transform: uppercase; }
+        .data-table tr:hover { background: var(--bg-hover); }
+        .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+        .badge-success { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+        .badge-warning { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
+        .badge-danger { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+        .badge-info { background: rgba(88, 166, 255, 0.2); color: var(--accent-blue); }
+        .badge-secondary { background: rgba(139, 148, 158, 0.2); color: var(--text-secondary); }
+        .activity-list { max-height: 300px; overflow-y: auto; }
+        .activity-item { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border-color); }
+        .activity-item:last-child { border-bottom: none; }
+        .activity-icon {
+            width: 32px; height: 32px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+        .activity-icon.success { background: rgba(63, 185, 80, 0.15); color: var(--accent-green); }
+        .activity-icon.info { background: rgba(88, 166, 255, 0.15); color: var(--accent-blue); }
+        .activity-icon.warning { background: rgba(210, 153, 34, 0.15); color: var(--accent-yellow); }
+        .activity-icon.error { background: rgba(248, 81, 73, 0.15); color: var(--accent-red); }
+        .activity-content { flex: 1; }
+        .activity-title { font-size: 13px; margin-bottom: 2px; }
+        .activity-time { font-size: 11px; color: var(--text-secondary); }
+        .log-panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; }
+        .log-panel h3 { font-size: 16px; margin-bottom: 15px; }
+        .log-content {
+            background: var(--bg-dark);
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        .log-line { margin-bottom: 4px; }
+        .log-line.info { color: var(--accent-blue); }
+        .log-line.success { color: var(--accent-green); }
+        .log-line.warning { color: var(--accent-yellow); }
+        .log-line.error { color: var(--accent-red); }
+        .settings-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+        .settings-section {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        .settings-section h3 { font-size: 16px; margin-bottom: 20px; padding-bottom: 10px; border-bottom: 1px solid var(--border-color); }
+        .modal-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal-content {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 24px;
+            max-width: 500px;
+            width: 90%;
+        }
+        .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .modal-title { font-size: 18px; font-weight: 600; }
+        .modal-close { background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; }
+        @media (max-width: 1200px) {
+            .stats-grid, .settings-grid { grid-template-columns: repeat(2, 1fr); }
+            .charts-grid { grid-template-columns: 1fr; }
+            .control-grid { grid-template-columns: 1fr; }
+        }
+        @media (max-width: 768px) {
+            .sidebar { transform: translateX(-100%); }
+            .main-content { margin-left: 0; }
+            .stats-grid, .settings-grid { grid-template-columns: 1fr; }
+            .progress-stages { grid-template-columns: repeat(2, 1fr); }
+        }
+    </style>
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-logo">🎬 P-ADE</div>
+        <ul class="sidebar-nav">
+            <li><a href="#" class="active" data-page="overview"><i class="bi bi-graph-up"></i> Overview</a></li>
+            <li><a href="#" data-page="jobs"><i class="bi bi-list-task"></i> Jobs</a></li>
+            <li><a href="#" data-page="videos"><i class="bi bi-film"></i> Videos</a></li>
+            <li><a href="#" data-page="episodes"><i class="bi bi-collection-play"></i> Episodes</a></li>
+            <li><a href="#" data-page="quality"><i class="bi bi-award"></i> Quality</a></li>
+            <li><a href="#" data-page="settings"><i class="bi bi-gear"></i> Settings</a></li>
+        </ul>
+        <div class="sidebar-footer">
+            <div class="db-status">
+                <span class="status-dot" id="db-status-dot"></span>
+                <span id="db-status-text">Checking...</span>
+            </div>
+            <div style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 11px;">v1.0.0</div>
+        </div>
+    </aside>
+    
+    <main class="main-content">
+        <header class="top-bar">
+            <h1 class="page-title" id="page-title">Overview</h1>
+            <div class="top-actions">
+                <span class="last-update" id="last-update">Last update: —</span>
+                <button class="btn-icon" onclick="refreshData()" title="Refresh"><i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+        </header>
+        
+        <!-- Overview Page -->
+        <div class="page-container active" id="page-overview">
+            <section class="control-panel">
+                <div class="control-grid">
+                    <div class="control-box">
+                        <h4>Pipeline Control</h4>
+                        <div class="form-group">
+                            <label class="form-label">Target Videos</label>
+                            <input type="number" class="form-control-dark" id="target-count" value="10" min="1" max="1000">
+                        </div>
+                        <div class="btn-group" style="margin-bottom: 10px;">
+                            <button class="btn-action btn-success" id="btn-start-all" onclick="startPipeline('all')">
+                                <i class="bi bi-play-fill"></i> Run All
+                            </button>
+                            <button class="btn-action btn-danger" id="btn-stop" onclick="stopPipeline()" disabled>
+                                <i class="bi bi-stop-fill"></i> Stop
+                            </button>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('crawl')">📡 Crawl</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('download')">📥 Download</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('detect')">🔍 Detect</button>
+                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('upload')">☁️ Upload</button>
+                        </div>
+                    </div>
+                    
+                    <div class="control-box">
+                        <h4>Pipeline Progress</h4>
+                        <div class="progress-stages">
+                            <div class="stage-item">
+                                <div class="stage-label">📡 Crawl</div>
+                                <div class="stage-progress"><div class="bar crawl" id="progress-crawl" style="width: 0%"></div></div>
+                            </div>
+                            <div class="stage-item">
+                                <div class="stage-label">📥 Download</div>
+                                <div class="stage-progress"><div class="bar download" id="progress-download" style="width: 0%"></div></div>
+                            </div>
+                            <div class="stage-item">
+                                <div class="stage-label">🔍 Detect</div>
+                                <div class="stage-progress"><div class="bar detect" id="progress-detect" style="width: 0%"></div></div>
+                            </div>
+                            <div class="stage-item">
+                                <div class="stage-label">☁️ Upload</div>
+                                <div class="stage-progress"><div class="bar upload" id="progress-upload" style="width: 0%"></div></div>
+                            </div>
+                        </div>
+                        <div class="total-progress"><div class="bar" id="progress-total" style="width: 0%"></div></div>
+                        <div class="progress-status">
+                            <span class="label">Status:</span>
+                            <span class="value" id="pipeline-status">Ready</span>
+                        </div>
+                    </div>
+                    
+                    <div class="control-box">
+                        <h4>Database Stats</h4>
+                        <div class="stat-row"><span class="stat-label">📹 Videos</span><span class="stat-value" id="stat-videos">—</span></div>
+                        <div class="stat-row"><span class="stat-label">🎬 Episodes</span><span class="stat-value" id="stat-episodes">—</span></div>
+                        <div class="stat-row"><span class="stat-label">☁️ Uploaded</span><span class="stat-value" id="stat-uploaded">—</span></div>
+                        <div class="stat-row"><span class="stat-label">💾 Storage</span><span class="stat-value" id="stat-storage">—</span></div>
+                    </div>
+                </div>
+            </section>
+            
+            <section class="dashboard-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-film"></i></div>
+                        <div class="value" id="card-videos">0</div>
+                        <div class="label">Total Videos</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-collection-play"></i></div>
+                        <div class="value" id="card-episodes">0</div>
+                        <div class="label">Episodes Generated</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-hdd"></i></div>
+                        <div class="value" id="card-storage">0 MB</div>
+                        <div class="label">Storage Used</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon purple"><i class="bi bi-cloud-upload"></i></div>
+                        <div class="value" id="card-uploaded">0</div>
+                        <div class="label">Uploaded to S3</div>
+                    </div>
+                </div>
+                
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3><i class="bi bi-bar-chart"></i> Pipeline Overview</h3>
+                        <div id="pipeline-chart" style="height: 250px; display: flex; align-items: flex-end; gap: 20px; padding: 20px;">
+                            <div style="flex: 1; text-align: center;">
+                                <div style="background: var(--accent-blue); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-videos"></div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Videos</div>
+                            </div>
+                            <div style="flex: 1; text-align: center;">
+                                <div style="background: var(--accent-purple); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-poses"></div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Poses</div>
+                            </div>
+                            <div style="flex: 1; text-align: center;">
+                                <div style="background: var(--accent-green); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-episodes"></div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Episodes</div>
+                            </div>
+                            <div style="flex: 1; text-align: center;">
+                                <div style="background: var(--accent-yellow); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-uploaded"></div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">Uploaded</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-card">
+                        <h3><i class="bi bi-clock-history"></i> Recent Activity</h3>
+                        <div class="activity-list" id="activity-list">
+                            <div class="activity-item">
+                                <div class="activity-icon info"><i class="bi bi-info"></i></div>
+                                <div class="activity-content">
+                                    <div class="activity-title">Dashboard started</div>
+                                    <div class="activity-time">Just now</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="log-panel">
+                    <h3><i class="bi bi-terminal"></i> Pipeline Logs</h3>
+                    <div class="log-content" id="log-content">
+                        <div class="log-line info">[INFO] Dashboard initialized</div>
+                        <div class="log-line">Waiting for pipeline to start...</div>
+                    </div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Jobs Page -->
+        <div class="page-container" id="page-jobs">
+            <section class="dashboard-content">
+                <div class="chart-card">
+                    <h3><i class="bi bi-list-task"></i> Pipeline Jobs
+                        <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="refreshJobs()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </h3>
+                    <table class="data-table" id="jobs-table">
+                        <thead>
+                            <tr><th>Job ID</th><th>Stage</th><th>Status</th><th>Started</th><th>Progress</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody id="jobs-tbody"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Videos Page -->
+        <div class="page-container" id="page-videos">
+            <section class="dashboard-content">
+                <div class="chart-card">
+                    <h3><i class="bi bi-film"></i> Video List
+                        <div style="margin-left: auto; display: flex; gap: 10px;">
+                            <select class="form-control-dark" id="video-filter" style="width: 150px;" onchange="loadVideos()">
+                                <option value="">All Status</option>
+                                <option value="downloaded">Downloaded</option>
+                                <option value="processed">Processed</option>
+                                <option value="uploaded">Uploaded</option>
+                                <option value="pending">Pending</option>
+                                <option value="failed">Failed</option>
+                            </select>
+                            <button class="btn-action btn-sm btn-danger" onclick="cleanupVideos()">
+                                <i class="bi bi-trash"></i> Cleanup
+                            </button>
+                        </div>
+                    </h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>ID</th><th>Title</th><th>Duration</th><th>Status</th><th>Size</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody id="videos-tbody"></tbody>
+                    </table>
+                    <div style="padding: 15px; text-align: center; color: var(--text-secondary);" id="videos-pagination"></div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Episodes Page -->
+        <div class="page-container" id="page-episodes">
+            <section class="dashboard-content">
+                <div class="chart-card">
+                    <h3><i class="bi bi-collection-play"></i> Episodes
+                        <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="loadEpisodes()">
+                            <i class="bi bi-arrow-clockwise"></i> Refresh
+                        </button>
+                    </h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>Filename</th><th>Video ID</th><th>Size</th><th>Created</th><th>Actions</th></tr>
+                        </thead>
+                        <tbody id="episodes-tbody"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Quality Page -->
+        <div class="page-container" id="page-quality">
+            <section class="dashboard-content">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-check-circle"></i></div>
+                        <div class="value" id="quality-passed">0</div>
+                        <div class="label">Quality Passed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon purple"><i class="bi bi-x-circle"></i></div>
+                        <div class="value" id="quality-failed">0</div>
+                        <div class="label">Quality Failed</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-speedometer2"></i></div>
+                        <div class="value" id="quality-avg">—</div>
+                        <div class="label">Avg Quality Score</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-percent"></i></div>
+                        <div class="value" id="quality-rate">—</div>
+                        <div class="label">Success Rate</div>
+                    </div>
+                </div>
+                
+                <div class="chart-card">
+                    <h3><i class="bi bi-file-text"></i> Quality Report</h3>
+                    <div id="quality-report" style="padding: 20px;">
+                        <p style="color: var(--text-secondary);">Loading quality report...</p>
+                    </div>
+                </div>
+            </section>
+        </div>
+        
+        <!-- Settings Page -->
+        <div class="page-container" id="page-settings">
+            <section class="dashboard-content">
+                <div class="settings-grid">
+                    <div class="settings-section">
+                        <h3><i class="bi bi-gear"></i> General Settings</h3>
+                        <div class="form-group">
+                            <label class="form-label">Auto Refresh</label>
+                            <select class="form-control-dark" id="setting-auto-refresh">
+                                <option value="true">Enabled</option>
+                                <option value="false">Disabled</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Refresh Interval (seconds)</label>
+                            <input type="number" class="form-control-dark" id="setting-refresh-interval" value="5" min="1" max="60">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Workers</label>
+                            <input type="number" class="form-control-dark" id="setting-max-workers" value="4" min="1" max="16">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3><i class="bi bi-cloud"></i> S3 Settings</h3>
+                        <div class="form-group">
+                            <label class="form-label">S3 Bucket Name</label>
+                            <input type="text" class="form-control-dark" id="setting-s3-bucket" placeholder="p-ade-data">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">AWS Region</label>
+                            <input type="text" class="form-control-dark" id="setting-aws-region" value="ap-northeast-2">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3><i class="bi bi-download"></i> Download Settings</h3>
+                        <div class="form-group">
+                            <label class="form-label">Video Quality</label>
+                            <select class="form-control-dark" id="setting-quality">
+                                <option value="360p">360p</option>
+                                <option value="480p">480p</option>
+                                <option value="720p" selected>720p</option>
+                                <option value="1080p">1080p</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Max Duration (minutes)</label>
+                            <input type="number" class="form-control-dark" id="setting-max-duration" value="30" min="1" max="120">
+                        </div>
+                    </div>
+                    
+                    <div class="settings-section">
+                        <h3><i class="bi bi-eye"></i> Detection Settings</h3>
+                        <div class="form-group">
+                            <label class="form-label">Confidence Threshold</label>
+                            <input type="number" class="form-control-dark" id="setting-confidence" value="0.5" min="0.1" max="1.0" step="0.1">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Detection Model</label>
+                            <select class="form-control-dark" id="setting-model">
+                                <option value="yolov8n">YOLOv8 Nano</option>
+                                <option value="yolov8s">YOLOv8 Small</option>
+                                <option value="yolov8m">YOLOv8 Medium</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                
+                <div style="margin-top: 20px; text-align: right;">
+                    <button class="btn-action btn-success" onclick="saveSettings()">
+                        <i class="bi bi-check-lg"></i> Save Settings
+                    </button>
+                </div>
+            </section>
+        </div>
+    </main>
+    
+    <div class="modal-overlay" id="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 class="modal-title" id="modal-title">Confirm</h3>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div id="modal-body"></div>
+            <div style="margin-top: 20px; text-align: right;">
+                <button class="btn-action btn-secondary" onclick="closeModal()">Cancel</button>
+                <button class="btn-action btn-primary" id="modal-confirm" onclick="confirmModal()">Confirm</button>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const API_BASE = '';
+        let isRunning = false;
+        let refreshInterval = null;
+        let currentPage = 'overview';
+        let modalCallback = null;
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshData();
+            startAutoRefresh();
+            setupNavigation();
+        });
+        
+        function setupNavigation() {
+            document.querySelectorAll('.sidebar-nav a').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    navigateTo(link.dataset.page);
+                });
+            });
+        }
+        
+        function navigateTo(page) {
+            currentPage = page;
+            document.querySelectorAll('.sidebar-nav a').forEach(l => l.classList.remove('active'));
+            document.querySelector(`[data-page="${page}"]`).classList.add('active');
+            document.querySelectorAll('.page-container').forEach(p => p.classList.remove('active'));
+            document.getElementById(`page-${page}`).classList.add('active');
+            document.getElementById('page-title').textContent = page.charAt(0).toUpperCase() + page.slice(1);
+            
+            if (page === 'jobs') refreshJobs();
+            else if (page === 'videos') loadVideos();
+            else if (page === 'episodes') loadEpisodes();
+            else if (page === 'quality') loadQuality();
+            else if (page === 'settings') loadSettings();
+        }
+        
+        function startAutoRefresh() {
+            refreshInterval = setInterval(() => {
+                if (currentPage === 'overview') refreshData();
+            }, 5000);
+        }
+        
+        async function refreshData() {
+            try {
+                const [statsRes, pipelineRes] = await Promise.all([
+                    fetch(`${API_BASE}/api/stats`),
+                    fetch(`${API_BASE}/api/pipeline/status`)
+                ]);
+                const stats = await statsRes.json();
+                const pipeline = await pipelineRes.json();
+                
+                const statusDot = document.getElementById('db-status-dot');
+                const statusText = document.getElementById('db-status-text');
+                if (stats.db.connected) {
+                    statusDot.classList.add('connected');
+                    statusText.textContent = 'DB Connected';
+                } else {
+                    statusDot.classList.remove('connected');
+                    statusText.textContent = 'DB Disconnected';
+                }
+                
+                document.getElementById('stat-videos').textContent = stats.files.raw_videos;
+                document.getElementById('stat-episodes').textContent = stats.files.episodes;
+                document.getElementById('stat-uploaded').textContent = stats.files.uploaded || 0;
+                document.getElementById('stat-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
+                
+                document.getElementById('card-videos').textContent = stats.files.raw_videos;
+                document.getElementById('card-episodes').textContent = stats.files.episodes;
+                document.getElementById('card-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
+                document.getElementById('card-uploaded').textContent = stats.files.uploaded || 0;
+                
+                const maxVal = Math.max(stats.files.raw_videos, stats.files.poses, stats.files.episodes, stats.files.uploaded || 1, 1);
+                document.getElementById('chart-bar-videos').style.height = `${(stats.files.raw_videos / maxVal) * 180}px`;
+                document.getElementById('chart-bar-poses').style.height = `${(stats.files.poses / maxVal) * 180}px`;
+                document.getElementById('chart-bar-episodes').style.height = `${(stats.files.episodes / maxVal) * 180}px`;
+                document.getElementById('chart-bar-uploaded').style.height = `${((stats.files.uploaded || 0) / maxVal) * 180}px`;
+                
+                document.getElementById('last-update').textContent = `Last update: ${new Date().toLocaleTimeString()}`;
+                
+                isRunning = pipeline.is_running;
+                updatePipelineUI(pipeline);
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+            }
+        }
+        
+        function updatePipelineUI(pipeline) {
+            document.getElementById('btn-start-all').disabled = pipeline.is_running;
+            document.getElementById('btn-stop').disabled = !pipeline.is_running;
+            
+            document.getElementById('progress-crawl').style.width = `${pipeline.progress.crawl}%`;
+            document.getElementById('progress-download').style.width = `${pipeline.progress.download}%`;
+            document.getElementById('progress-detect').style.width = `${pipeline.progress.detect}%`;
+            document.getElementById('progress-upload').style.width = `${pipeline.progress.upload}%`;
+            
+            const total = (pipeline.progress.crawl + pipeline.progress.download + pipeline.progress.detect + pipeline.progress.upload) / 4;
+            document.getElementById('progress-total').style.width = `${total}%`;
+            
+            let status = 'Ready';
+            if (pipeline.is_running) status = `Running: ${pipeline.current_stage || 'Initializing...'}`;
+            else if (total > 0 && total < 100) status = 'Paused';
+            else if (total >= 100) status = 'Completed';
+            document.getElementById('pipeline-status').textContent = status;
+            
+            if (pipeline.logs && pipeline.logs.length > 0) {
+                const logContent = document.getElementById('log-content');
+                logContent.innerHTML = pipeline.logs.slice(-30).map(log => {
+                    let cls = '';
+                    if (log.includes('ERROR') || log.includes('❌')) cls = 'error';
+                    else if (log.includes('SUCCESS') || log.includes('✅') || log.includes('완료')) cls = 'success';
+                    else if (log.includes('WARN') || log.includes('⚠')) cls = 'warning';
+                    else if (log.includes('INFO') || log.includes('🔍') || log.includes('📥')) cls = 'info';
+                    return `<div class="log-line ${cls}">${escapeHtml(log)}</div>`;
+                }).join('');
+                logContent.scrollTop = logContent.scrollHeight;
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        async function startPipeline(stage) {
+            const target = document.getElementById('target-count').value;
+            try {
+                addActivity('info', `Starting pipeline: ${stage}...`);
+                const res = await fetch(`${API_BASE}/api/pipeline/start`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_count: parseInt(target), stage: stage })
+                });
+                const result = await res.json();
+                if (result.success) addActivity('success', `Pipeline ${stage} started`);
+                else addActivity('warning', `Failed: ${result.message}`);
+                refreshData();
+            } catch (error) {
+                console.error('Error starting pipeline:', error);
+                addActivity('error', 'Error starting pipeline');
+            }
+        }
+        
+        async function stopPipeline() {
+            try {
+                addActivity('warning', 'Stopping pipeline...');
+                const res = await fetch(`${API_BASE}/api/pipeline/stop`, { method: 'POST' });
+                const result = await res.json();
+                if (result.success) addActivity('info', 'Pipeline stopped');
+                refreshData();
+            } catch (error) {
+                console.error('Error stopping pipeline:', error);
+            }
+        }
+        
+        async function refreshJobs() {
+            try {
+                const res = await fetch(`${API_BASE}/api/jobs`);
+                const jobs = await res.json();
+                const tbody = document.getElementById('jobs-tbody');
+                if (jobs.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No jobs found</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = jobs.map(job => `
+                    <tr>
+                        <td>${job.id}</td>
+                        <td>${job.stage}</td>
+                        <td><span class="badge badge-${job.status === 'completed' ? 'success' : job.status === 'running' ? 'info' : job.status === 'failed' ? 'danger' : 'secondary'}">${job.status}</span></td>
+                        <td>${job.started_at || '—'}</td>
+                        <td>${job.progress}%</td>
+                        <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">Logs</button></td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading jobs:', error);
+            }
+        }
+        
+        function viewJobLogs(jobId) {
+            showModal('Job Logs', `<div class="log-content" style="max-height: 300px;">Loading logs for job ${jobId}...</div>`);
+        }
+        
+        async function loadVideos() {
+            try {
+                const filter = document.getElementById('video-filter').value;
+                const res = await fetch(`${API_BASE}/api/videos?status=${filter}`);
+                const data = await res.json();
+                const tbody = document.getElementById('videos-tbody');
+                if (data.videos.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">No videos found</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = data.videos.map(v => `
+                    <tr>
+                        <td>${v.id}</td>
+                        <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(v.title || v.video_id)}</td>
+                        <td>${v.duration || '—'}</td>
+                        <td><span class="badge badge-${v.status === 'uploaded' ? 'success' : v.status === 'downloaded' ? 'info' : v.status === 'failed' ? 'danger' : 'secondary'}">${v.status}</span></td>
+                        <td>${v.size_mb ? v.size_mb.toFixed(1) + ' MB' : '—'}</td>
+                        <td><button class="btn-action btn-sm btn-danger" onclick="deleteVideo(${v.id})"><i class="bi bi-trash"></i></button></td>
+                    </tr>
+                `).join('');
+                document.getElementById('videos-pagination').textContent = `Showing ${data.videos.length} of ${data.total} videos`;
+            } catch (error) {
+                console.error('Error loading videos:', error);
+            }
+        }
+        
+        async function deleteVideo(id) {
+            if (!confirm('Are you sure you want to delete this video?')) return;
+            try {
+                await fetch(`${API_BASE}/api/videos/${id}`, { method: 'DELETE' });
+                loadVideos();
+                addActivity('success', `Video ${id} deleted`);
+            } catch (error) {
+                console.error('Error deleting video:', error);
+            }
+        }
+        
+        async function cleanupVideos() {
+            if (!confirm('This will delete all failed/orphaned video files. Continue?')) return;
+            try {
+                const res = await fetch(`${API_BASE}/api/cleanup`, { method: 'POST' });
+                const result = await res.json();
+                addActivity('success', `Cleanup completed: ${result.deleted} files removed`);
+                loadVideos();
+                refreshData();
+            } catch (error) {
+                console.error('Error during cleanup:', error);
+            }
+        }
+        
+        async function loadEpisodes() {
+            try {
+                const res = await fetch(`${API_BASE}/api/episodes`);
+                const episodes = await res.json();
+                const tbody = document.getElementById('episodes-tbody');
+                if (episodes.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: var(--text-secondary);">No episodes found</td></tr>';
+                    return;
+                }
+                tbody.innerHTML = episodes.map(e => `
+                    <tr>
+                        <td>${escapeHtml(e.filename)}</td>
+                        <td>${e.video_id || '—'}</td>
+                        <td>${e.size_mb.toFixed(2)} MB</td>
+                        <td>${e.created}</td>
+                        <td>
+                            <button class="btn-action btn-sm btn-secondary" onclick="downloadEpisode('${e.filename}')"><i class="bi bi-download"></i></button>
+                            <button class="btn-action btn-sm btn-danger" onclick="deleteEpisode('${e.filename}')"><i class="bi bi-trash"></i></button>
+                        </td>
+                    </tr>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading episodes:', error);
+            }
+        }
+        
+        function downloadEpisode(filename) {
+            window.open(`${API_BASE}/api/episodes/${filename}/download`, '_blank');
+        }
+        
+        async function deleteEpisode(filename) {
+            if (!confirm(`Delete episode ${filename}?`)) return;
+            try {
+                await fetch(`${API_BASE}/api/episodes/${filename}`, { method: 'DELETE' });
+                loadEpisodes();
+                addActivity('success', `Episode deleted: ${filename}`);
+            } catch (error) {
+                console.error('Error deleting episode:', error);
+            }
+        }
+        
+        async function loadQuality() {
+            try {
+                const res = await fetch(`${API_BASE}/api/quality`);
+                const data = await res.json();
+                document.getElementById('quality-passed').textContent = data.passed || 0;
+                document.getElementById('quality-failed').textContent = data.failed || 0;
+                document.getElementById('quality-avg').textContent = data.avg_score ? data.avg_score.toFixed(2) : '—';
+                document.getElementById('quality-rate').textContent = data.success_rate ? `${data.success_rate.toFixed(1)}%` : '—';
+                const report = document.getElementById('quality-report');
+                if (data.report) {
+                    report.innerHTML = `<pre style="color: var(--text-primary); white-space: pre-wrap;">${escapeHtml(JSON.stringify(data.report, null, 2))}</pre>`;
+                } else {
+                    report.innerHTML = '<p style="color: var(--text-secondary);">No quality report available</p>';
+                }
+            } catch (error) {
+                console.error('Error loading quality:', error);
+            }
+        }
+        
+        async function loadSettings() {
+            try {
+                const res = await fetch(`${API_BASE}/api/settings`);
+                const settings = await res.json();
+                document.getElementById('setting-auto-refresh').value = settings.auto_refresh ? 'true' : 'false';
+                document.getElementById('setting-refresh-interval').value = settings.refresh_interval || 5;
+                document.getElementById('setting-max-workers').value = settings.max_workers || 4;
+                document.getElementById('setting-s3-bucket').value = settings.s3_bucket || '';
+                document.getElementById('setting-quality').value = settings.download_quality || '720p';
+                document.getElementById('setting-confidence').value = settings.detect_confidence || 0.5;
+            } catch (error) {
+                console.error('Error loading settings:', error);
+            }
+        }
+        
+        async function saveSettings() {
+            const settings = {
+                auto_refresh: document.getElementById('setting-auto-refresh').value === 'true',
+                refresh_interval: parseInt(document.getElementById('setting-refresh-interval').value),
+                max_workers: parseInt(document.getElementById('setting-max-workers').value),
+                s3_bucket: document.getElementById('setting-s3-bucket').value,
+                download_quality: document.getElementById('setting-quality').value,
+                detect_confidence: parseFloat(document.getElementById('setting-confidence').value)
+            };
+            try {
+                const res = await fetch(`${API_BASE}/api/settings`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                if (res.ok) addActivity('success', 'Settings saved');
+            } catch (error) {
+                console.error('Error saving settings:', error);
+            }
+        }
+        
+        function addActivity(type, message) {
+            const list = document.getElementById('activity-list');
+            const icons = { success: 'check-lg', info: 'info', warning: 'exclamation-triangle', error: 'x-circle' };
+            const item = document.createElement('div');
+            item.className = 'activity-item';
+            item.innerHTML = `
+                <div class="activity-icon ${type}"><i class="bi bi-${icons[type]}"></i></div>
+                <div class="activity-content">
+                    <div class="activity-title">${escapeHtml(message)}</div>
+                    <div class="activity-time">${new Date().toLocaleTimeString()}</div>
+                </div>
+            `;
+            list.insertBefore(item, list.firstChild);
+            while (list.children.length > 10) list.removeChild(list.lastChild);
+        }
+        
+        function showModal(title, body, onConfirm) {
+            document.getElementById('modal-title').textContent = title;
+            document.getElementById('modal-body').innerHTML = body;
+            document.getElementById('modal').classList.add('active');
+            modalCallback = onConfirm;
+        }
+        
+        function closeModal() {
+            document.getElementById('modal').classList.remove('active');
+            modalCallback = null;
+        }
+        
+        function confirmModal() {
+            if (modalCallback) modalCallback();
+            closeModal();
+        }
+    </script>
+</body>
+</html>'''
+
+
+# ============================================================================
+# API Routes
+# ============================================================================
+
+@app.route("/")
+def index():
+    """메인 페이지"""
+    return render_template_string(HTML_TEMPLATE)
+
+
+@app.route("/api/stats")
+def api_stats():
+    """통계 API"""
+    return jsonify({
+        "files": get_file_stats(),
+        "db": get_db_stats(),
+    })
+
+
+@app.route("/api/pipeline/status")
+def api_pipeline_status():
+    """파이프라인 상태"""
+    return jsonify({
+        "is_running": pipeline_state["is_running"],
+        "current_stage": pipeline_state["current_stage"],
+        "progress": pipeline_state["progress"],
+        "logs": pipeline_state["logs"][-50:],
+        "started_at": pipeline_state["started_at"],
+    })
+
+
+@app.route("/api/pipeline/start", methods=["POST"])
+def api_pipeline_start():
+    """파이프라인 시작"""
+    if pipeline_state["is_running"]:
+        return jsonify({"success": False, "message": "Pipeline is already running"})
+    
+    data = request.json or {}
+    target_count = data.get("target_count", 50)
+    stage = data.get("stage", "all")
+    
+    def run_pipeline():
+        pipeline_state["is_running"] = True
+        pipeline_state["started_at"] = datetime.now().isoformat()
+        pipeline_state["logs"] = [f"[INFO] Pipeline started - stage: {stage}, target: {target_count}"]
+        
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        
+        stages = ["crawl", "download", "detect", "upload"] if stage == "all" else [stage]
+        
+        # 작업 기록 추가
+        job_id = len(jobs_history) + 1
+        job = {
+            "id": job_id,
+            "stage": stage,
+            "status": "running",
+            "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "progress": 0
+        }
+        jobs_history.insert(0, job)
+        
+        try:
+            for current_stage in stages:
+                if not pipeline_state["is_running"]:
+                    break
+                
+                pipeline_state["current_stage"] = current_stage
+                pipeline_state["logs"].append(f"[INFO] Starting {current_stage} stage...")
+                
+                cmd = [
+                    sys.executable, str(PROJECT_ROOT / "mass_collector.py"),
+                    "--target", str(target_count),
+                    "--stage", current_stage
+                ]
+                
+                proc = subprocess.Popen(
+                    cmd, cwd=str(PROJECT_ROOT),
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, encoding="utf-8", errors="replace", env=env
+                )
+                pipeline_state["process"] = proc
+                
+                for line in proc.stdout:
+                    line = line.strip()
+                    if line:
+                        pipeline_state["logs"].append(line)
+                    if not pipeline_state["is_running"]:
+                        proc.terminate()
+                        break
+                
+                proc.wait()
+                pipeline_state["progress"][current_stage] = 100
+                
+                # 작업 진행률 업데이트
+                completed_stages = sum(1 for s in stages if pipeline_state["progress"].get(s, 0) >= 100)
+                job["progress"] = int(completed_stages / len(stages) * 100)
+            
+            if pipeline_state["is_running"]:
+                pipeline_state["logs"].append("[SUCCESS] ✅ Pipeline completed!")
+                job["status"] = "completed"
+                job["progress"] = 100
+            else:
+                job["status"] = "stopped"
+            
+        except Exception as e:
+            pipeline_state["logs"].append(f"[ERROR] {e}")
+            job["status"] = "failed"
+        
+        finally:
+            pipeline_state["is_running"] = False
+            pipeline_state["current_stage"] = None
+            pipeline_state["process"] = None
+    
+    thread = threading.Thread(target=run_pipeline, daemon=True)
+    thread.start()
+    
+    return jsonify({"success": True, "message": f"Pipeline started: {stage}"})
+
+
+@app.route("/api/pipeline/stop", methods=["POST"])
+def api_pipeline_stop():
+    """파이프라인 중지"""
+    pipeline_state["is_running"] = False
+    
+    if pipeline_state["process"]:
+        try:
+            pipeline_state["process"].terminate()
+        except Exception:
+            pass
+    
+    pipeline_state["logs"].append("[INFO] Pipeline stopped by user")
+    
+    return jsonify({"success": True, "message": "Pipeline stopped"})
+
+
+@app.route("/api/jobs")
+def api_jobs():
+    """작업 목록"""
+    return jsonify(jobs_history[:20])
+
+
+@app.route("/api/videos")
+def api_videos():
+    """비디오 목록"""
+    status_filter = request.args.get("status", "")
+    
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"videos": [], "total": 0})
+    
+    try:
+        if status_filter:
+            cur = conn.execute(
+                "SELECT id, video_id, title, duration, status, file_size FROM videos WHERE status = ? ORDER BY id DESC LIMIT 100",
+                (status_filter,)
+            )
+        else:
+            cur = conn.execute(
+                "SELECT id, video_id, title, duration, status, file_size FROM videos ORDER BY id DESC LIMIT 100"
+            )
+        
+        videos = []
+        for row in cur.fetchall():
+            videos.append({
+                "id": row["id"],
+                "video_id": row["video_id"],
+                "title": row["title"],
+                "duration": row["duration"],
+                "status": row["status"],
+                "size_mb": row["file_size"] / (1024 * 1024) if row["file_size"] else None
+            })
+        
+        # 전체 개수
+        cur = conn.execute("SELECT COUNT(*) FROM videos")
+        total = cur.fetchone()[0]
+        
+        conn.close()
+        return jsonify({"videos": videos, "total": total})
+    except Exception as e:
+        return jsonify({"videos": [], "total": 0, "error": str(e)})
+
+
+@app.route("/api/videos/<int:video_id>", methods=["DELETE"])
+def api_delete_video(video_id):
+    """비디오 삭제"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"success": False, "message": "DB not connected"})
+    
+    try:
+        # 파일 경로 조회
+        cur = conn.execute("SELECT video_id FROM videos WHERE id = ?", (video_id,))
+        row = cur.fetchone()
+        if row:
+            video_file = PROJECT_ROOT / "data" / "raw" / f"{row['video_id']}.mp4"
+            if video_file.exists():
+                video_file.unlink()
+        
+        # DB에서 삭제
+        conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+        conn.commit()
+        conn.close()
+        
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+
+@app.route("/api/episodes")
+def api_episodes():
+    """에피소드 목록"""
+    episodes_dir = PROJECT_ROOT / "data" / "episodes"
+    if not episodes_dir.exists():
+        return jsonify([])
+    
+    episodes = []
+    for f in sorted(episodes_dir.glob("*.npz"), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
+        stat = f.stat()
+        # video_id 추출 (파일명에서)
+        video_id = f.stem.split("_")[0] if "_" in f.stem else f.stem
+        episodes.append({
+            "filename": f.name,
+            "video_id": video_id,
+            "size_mb": stat.st_size / (1024 * 1024),
+            "created": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+        })
+    
+    return jsonify(episodes)
+
+
+@app.route("/api/episodes/<filename>/download")
+def api_download_episode(filename):
+    """에피소드 다운로드"""
+    file_path = PROJECT_ROOT / "data" / "episodes" / filename
+    if file_path.exists():
+        return send_file(str(file_path), as_attachment=True)
+    return jsonify({"error": "File not found"}), 404
+
+
+@app.route("/api/episodes/<filename>", methods=["DELETE"])
+def api_delete_episode(filename):
+    """에피소드 삭제"""
+    file_path = PROJECT_ROOT / "data" / "episodes" / filename
+    if file_path.exists():
+        file_path.unlink()
+        return jsonify({"success": True})
+    return jsonify({"success": False, "message": "File not found"})
+
+
+@app.route("/api/cleanup", methods=["POST"])
+def api_cleanup():
+    """정리 작업"""
+    deleted = 0
+    
+    # 실패한 비디오 파일 삭제
+    raw_dir = PROJECT_ROOT / "data" / "raw"
+    if raw_dir.exists():
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.execute("SELECT video_id FROM videos WHERE status = 'failed'")
+                failed_ids = {row["video_id"] for row in cur.fetchall()}
+                
+                for f in raw_dir.glob("*.mp4"):
+                    if f.stem in failed_ids:
+                        f.unlink()
+                        deleted += 1
+                
+                # failed 상태 레코드 삭제
+                conn.execute("DELETE FROM videos WHERE status = 'failed'")
+                conn.commit()
+                conn.close()
+            except:
+                pass
+    
+    return jsonify({"success": True, "deleted": deleted})
+
+
+@app.route("/api/quality")
+def api_quality():
+    """품질 통계"""
+    quality_report_path = PROJECT_ROOT / "data" / "quality_report.json"
+    
+    result = {
+        "passed": 0,
+        "failed": 0,
+        "avg_score": 0,
+        "success_rate": 0,
+        "report": None
+    }
+    
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
+            result["passed"] = cur.fetchone()[0]
+            
+            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'failed'")
+            result["failed"] = cur.fetchone()[0]
+            
+            total = result["passed"] + result["failed"]
+            if total > 0:
+                result["success_rate"] = (result["passed"] / total) * 100
+            
+            cur = conn.execute("SELECT AVG(quality_score) FROM videos WHERE quality_score IS NOT NULL")
+            avg = cur.fetchone()[0]
+            result["avg_score"] = avg if avg else 0
+            
+            conn.close()
+        except:
+            pass
+    
+    # 품질 보고서 로드
+    if quality_report_path.exists():
+        try:
+            with open(quality_report_path, "r") as f:
+                result["report"] = json.load(f)
+        except:
+            pass
+    
+    return jsonify(result)
+
+
+@app.route("/api/settings", methods=["GET"])
+def api_get_settings():
+    """설정 조회"""
+    return jsonify(settings_state)
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_save_settings():
+    """설정 저장"""
+    data = request.json or {}
+    
+    for key in settings_state:
+        if key in data:
+            settings_state[key] = data[key]
+    
+    return jsonify({"success": True})
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
+    """웹 대시보드 실행"""
+    print(f"""
+╔══════════════════════════════════════════════════════════════════╗
+║                     P-ADE Web Dashboard                         ║
+╠══════════════════════════════════════════════════════════════════╣
+║  URL: http://localhost:{port}                                    ║
+║  API: http://localhost:{port}/api/stats                          ║
+╚══════════════════════════════════════════════════════════════════╝
+""")
+    app.run(host=host, port=port, debug=debug, threaded=True)
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="P-ADE Web Dashboard")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
+    parser.add_argument("--port", type=int, default=5000, help="Port to bind")
+    parser.add_argument("--debug", action="store_true", help="Debug mode")
+    args = parser.parse_args()
+    
+    run_web_dashboard(host=args.host, port=args.port, debug=args.debug)
