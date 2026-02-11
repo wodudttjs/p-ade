@@ -70,6 +70,8 @@ class PipelineConfig:
     min_duration_sec: int = 30
     max_duration_sec: int = 1200
     content_filter: bool = True
+    use_multiprocess: bool = False  # 멀티프로세스 크롤링 모드
+    use_async: bool = False  # 비동기 크롤링 모드
     
     # 다운로드 설정
     download_workers: int = 6
@@ -80,6 +82,11 @@ class PipelineConfig:
     detect_fps: float = 5.0
     detect_device: Optional[str] = None  # None = auto-detect
     detect_batch_size: int = 50
+    use_gpu_streams: bool = True  # GPU 3-stream 병렬 처리
+    
+    # 품질 평가 설정
+    quality_filter: bool = True  # 품질 필터링 활성화
+    quality_threshold: float = 60.0  # 통과 점수 (100점 만점)
     
     # 업로드 설정
     s3_bucket: str = ""
@@ -173,7 +180,7 @@ class PipelineReport:
 class MassCollector:
     """대량 수집 파이프라인 오케스트레이터"""
 
-    STAGES = ["crawl", "download", "detect", "upload"]
+    STAGES = ["crawl", "download", "detect", "quality", "upload"]
 
     def __init__(self, config: PipelineConfig):
         self.config = config
@@ -270,7 +277,11 @@ class MassCollector:
                 elapsed_sec=time.time() - start,
             )
 
-        # 크롤링 실행
+        # ── 멀티프로세스 모드 ──
+        if self.config.use_multiprocess:
+            return self._crawl_multiprocess(keywords, start)
+
+        # ── 기본 모드 (SingleProcess / Async) ──
         crawler = MultiSourceCrawler(
             sources=self.config.sources,
             max_results=self.config.crawl_target,
@@ -279,6 +290,7 @@ class MassCollector:
             min_duration_sec=self.config.min_duration_sec,
             max_duration_sec=self.config.max_duration_sec,
             content_filter=self.config.content_filter,
+            async_mode=self.config.use_async,
         )
 
         results, stats = crawler.crawl(keywords)
@@ -304,8 +316,49 @@ class MassCollector:
                 "duplicates": stats.total_duplicates,
                 "filtered": stats.total_filtered,
                 "by_source": stats.by_source,
+                "mode": "async" if self.config.use_async else "sync",
             },
         )
+
+    def _crawl_multiprocess(self, keywords: List[str], start: float) -> StageResult:
+        """멀티프로세스 크롤링 (Task 2.1 통합)"""
+        from workers.crawl_worker import run_workers
+        from queue.task_queue import CrawlTaskQueue
+
+        print(f"  🏭 멀티프로세스 모드 (워커: {self.config.crawl_workers}개)")
+
+        try:
+            stats = run_workers(
+                num_workers=self.config.crawl_workers,
+                keywords=keywords,
+                source=self.config.sources[0] if self.config.sources else "youtube",
+                max_results_per_task=self.config.crawl_target // max(len(keywords), 1),
+            )
+
+            # 결과 수집
+            queue = CrawlTaskQueue()
+            all_results = queue.get_all_results()
+
+            total_count = sum(len(v) for v in all_results.values()) if isinstance(all_results, dict) else 0
+            self.report.total_crawled = total_count
+
+            return StageResult(
+                stage="crawl",
+                success=total_count > 0,
+                count=total_count,
+                errors=stats.get("total_failed", 0) if isinstance(stats, dict) else 0,
+                elapsed_sec=time.time() - start,
+                details={
+                    "keywords_used": len(keywords),
+                    "mode": "multiprocess",
+                    "workers": self.config.crawl_workers,
+                    "completed": stats.get("total_completed", 0) if isinstance(stats, dict) else 0,
+                },
+            )
+        except Exception as e:
+            logger.error(f"멀티프로세스 크롤링 실패, 기본 모드로 폴백: {e}")
+            self.config.use_multiprocess = False
+            return self._stage_crawl()
 
     # ============================================================
     # 2단계: 다운로드
@@ -405,7 +458,7 @@ class MassCollector:
     # ============================================================
 
     def _stage_detect(self) -> StageResult:
-        """객체 검출 및 Episode 생성"""
+        """객체 검출 및 Episode 생성 (GPU 3-Stream 통합)"""
         from extraction.detect_to_episodes import run as run_detect
 
         start = time.time()
@@ -427,6 +480,24 @@ class MassCollector:
                 details={"existing": len(existing_episodes), "dry_run": True},
                 elapsed_sec=time.time() - start,
             )
+
+        # ── GPU 3-Stream 병렬 처리 ──
+        gpu_info = {}
+        if self.config.use_gpu_streams:
+            try:
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                gpu_info = {
+                    "gpu_streams": True,
+                    "batch_size": batch_size,
+                    "vram_allocated_gb": vram.get("allocated", 0),
+                }
+                print(f"  🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+            except Exception as e:
+                logger.warning(f"GPU 3-Stream 초기화 실패, 기본 모드 사용: {e}")
+                gpu_info = {"gpu_streams": False, "reason": str(e)}
 
         # detect_to_episodes 실행
         try:
@@ -460,6 +531,107 @@ class MassCollector:
                 "total_episodes": total_episodes,
                 "new_episodes": new_count,
                 "device": self.config.detect_device or "auto",
+                **gpu_info,
+            },
+        )
+
+    # ============================================================
+    # 3.5단계: 품질 평가 (Task 2.3 통합)
+    # ============================================================
+
+    def _stage_quality(self) -> StageResult:
+        """에피소드 품질 평가 및 필터링"""
+        from quality.evaluator import RobotArmQualityEvaluator, QualityStats, QualityConfig
+        import numpy as np
+
+        start = time.time()
+        episodes_dir = Path(self.config.episodes_dir)
+
+        if not episodes_dir.exists():
+            return StageResult(
+                stage="quality", success=False, errors=1,
+                details={"error": "에피소드 디렉토리가 없습니다"},
+                elapsed_sec=time.time() - start,
+            )
+
+        npz_files = list(episodes_dir.glob("*.npz"))
+        if not npz_files:
+            return StageResult(
+                stage="quality", success=True, count=0,
+                details={"message": "평가할 에피소드 없음"},
+                elapsed_sec=time.time() - start,
+            )
+
+        print(f"  🔍 품질 평가 대상: {len(npz_files)}개 에피소드")
+
+        if not self.config.quality_filter:
+            print(f"  ⏭️ 품질 필터링 비활성화")
+            return StageResult(
+                stage="quality", success=True, count=len(npz_files),
+                details={"skipped": True, "filter_disabled": True},
+                elapsed_sec=time.time() - start,
+            )
+
+        if self.config.dry_run:
+            return StageResult(
+                stage="quality", success=True, count=0,
+                details={"target": len(npz_files), "dry_run": True},
+                elapsed_sec=time.time() - start,
+            )
+
+        # 품질 평가
+        config = QualityConfig(pass_threshold=self.config.quality_threshold)
+        evaluator = RobotArmQualityEvaluator(config=config)
+        stats = QualityStats()
+
+        passed_count = 0
+        failed_count = 0
+        errors = 0
+
+        for npz_path in npz_files:
+            try:
+                data = np.load(str(npz_path), allow_pickle=True)
+
+                # 시퀀스 데이터 추출
+                sequence = {
+                    "body": data.get("body_landmarks", data.get("poses", np.array([]))),
+                    "left_hand": data.get("left_hand_landmarks", np.array([])),
+                    "right_hand": data.get("right_hand_landmarks", np.array([])),
+                }
+
+                video_id = npz_path.stem.replace("_episode", "")
+                result = evaluator.evaluate(sequence, video_id=video_id)
+                stats.record(result)
+
+                if result.passed:
+                    passed_count += 1
+                else:
+                    failed_count += 1
+                    # 실패한 에피소드 이동 (삭제 대신 rejected 폴더로)
+                    rejected_dir = episodes_dir / "rejected"
+                    rejected_dir.mkdir(exist_ok=True)
+                    npz_path.rename(rejected_dir / npz_path.name)
+
+            except Exception as e:
+                errors += 1
+                logger.warning(f"품질 평가 실패: {npz_path.name} - {e}")
+
+        # 보고서 출력
+        stats.print_report()
+
+        return StageResult(
+            stage="quality",
+            success=passed_count > 0,
+            count=passed_count,
+            errors=errors,
+            elapsed_sec=time.time() - start,
+            details={
+                "total_evaluated": passed_count + failed_count,
+                "passed": passed_count,
+                "rejected": failed_count,
+                "pass_rate": f"{stats.pass_rate:.1f}%" if hasattr(stats, 'pass_rate') else "N/A",
+                "threshold": self.config.quality_threshold,
+                "grades": stats.grades if hasattr(stats, 'grades') else {},
             },
         )
 
@@ -622,7 +794,7 @@ def main():
     )
 
     parser.add_argument("--target", type=int, default=500, help="수집 목표 수 (기본: 500)")
-    parser.add_argument("--stage", help="단일 단계 실행: crawl, download, detect, upload")
+    parser.add_argument("--stage", help="단일 단계 실행: crawl, download, detect, quality, upload")
     parser.add_argument("--start-stage", help="시작 단계")
     parser.add_argument("--end-stage", help="종료 단계")
     parser.add_argument("--keywords", help="커스텀 키워드 (콤마 구분)")
@@ -643,6 +815,11 @@ def main():
     parser.add_argument("--no-resume", action="store_true", help="이전 진행 무시")
     parser.add_argument("--min-duration", type=int, default=30)
     parser.add_argument("--max-duration", type=int, default=1200)
+    parser.add_argument("--multiprocess", action="store_true", help="멀티프로세스 크롤링 모드")
+    parser.add_argument("--async", dest="use_async", action="store_true", help="비동기 크롤링 모드")
+    parser.add_argument("--no-gpu-streams", action="store_true", help="GPU 3-Stream 비활성화")
+    parser.add_argument("--no-quality-filter", action="store_true", help="품질 필터링 비활성화")
+    parser.add_argument("--quality-threshold", type=float, default=60.0, help="품질 통과 점수 (기본: 60)")
 
     args = parser.parse_args()
 
@@ -664,6 +841,11 @@ def main():
         episodes_dir=args.episodes_dir,
         dry_run=args.dry_run,
         resume=not args.no_resume,
+        use_multiprocess=args.multiprocess,
+        use_async=args.use_async,
+        use_gpu_streams=not args.no_gpu_streams,
+        quality_filter=not args.no_quality_filter,
+        quality_threshold=args.quality_threshold,
     )
 
     collector = MassCollector(config)

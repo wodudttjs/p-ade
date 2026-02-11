@@ -1,5 +1,7 @@
 absl-py==2.4.0
 amqp==5.3.1
+aiohttp>=3.9.0
+aiodns>=3.1.0
 attrs==25.4.0
 Automat==25.4.16
 billiard==4.2.4

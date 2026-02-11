@@ -29,6 +29,13 @@ from urllib.parse import quote_plus
 from core.logging_config import setup_logger
 from ingestion.rate_limiter import SourceRateLimiter, RetryManager, RetryConfig
 
+# 캐시 (선택적 임포트)
+try:
+    from cache.redis_cache import CrawlCache, get_cache
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+
 logger = setup_logger(__name__)
 
 
@@ -350,6 +357,8 @@ class MultiSourceCrawler:
         min_duration_sec: int = MIN_DURATION_SEC,
         max_duration_sec: int = MAX_DURATION_SEC,
         content_filter: bool = True,
+        use_cache: bool = True,  # 캐시 사용 여부
+        async_mode: bool = False,  # 비동기 모드 사용 여부
     ):
         self.sources = sources or ["youtube", "google_videos"]
         self.max_results = max_results
@@ -358,6 +367,8 @@ class MultiSourceCrawler:
         self.min_duration_sec = min_duration_sec
         self.max_duration_sec = max_duration_sec
         self.content_filter = content_filter
+        self.use_cache = use_cache and CACHE_AVAILABLE
+        self.async_mode = async_mode
 
         self._rate_limiter = SourceRateLimiter()
         self._ydl_searcher = _YtDlpSearcher(self._rate_limiter)
@@ -365,6 +376,20 @@ class MultiSourceCrawler:
 
         self._seen_ids: Set[str] = set()
         self._lock = threading.Lock()
+        
+        # 캐시 초기화
+        self._cache: Optional[CrawlCache] = None
+        if self.use_cache:
+            try:
+                self._cache = get_cache()
+                if self._cache.is_connected:
+                    logger.info("✅ Redis 캐시 연결됨")
+                else:
+                    logger.warning("⚠️ Redis 연결 실패, 캐시 없이 진행")
+                    self._cache = None
+            except Exception as e:
+                logger.warning(f"⚠️ 캐시 초기화 실패: {e}")
+                self._cache = None
 
     def crawl(
         self,
@@ -373,6 +398,8 @@ class MultiSourceCrawler:
     ) -> tuple:  # (List[CrawlResult], CrawlStats)
         """
         다중 소스에서 병렬 크롤링 실행
+        
+        async_mode=True인 경우 비동기 크롤러로 위임합니다.
 
         Args:
             keywords: 검색 키워드 리스트
@@ -381,6 +408,10 @@ class MultiSourceCrawler:
         Returns:
             (결과 리스트, 통계 객체)
         """
+        # 비동기 모드 위임
+        if self.async_mode:
+            return self._crawl_async(keywords, progress_callback)
+        
         start_time = time.time()
         stats = CrawlStats()
         all_results: List[CrawlResult] = []
@@ -414,10 +445,46 @@ class MultiSourceCrawler:
 
         def _execute_task(task_info):
             source, kw, limit = task_info
+            
+            # 캐시 조회 시도
+            if self._cache:
+                cache_key = f"{source}:{kw}"
+                cached = self._cache.get_search_results(kw, source)
+                if cached:
+                    logger.debug(f"📋 캐시 히트: [{source}] '{kw}' ({len(cached)}개)")
+                    # 캐시된 결과를 CrawlResult로 변환
+                    results = []
+                    for item in cached:
+                        results.append(CrawlResult(
+                            video_id=item.get("video_id", ""),
+                            url=item.get("url", ""),
+                            title=item.get("title", ""),
+                            description=item.get("description", ""),
+                            duration_sec=item.get("duration_sec"),
+                            view_count=item.get("view_count"),
+                            channel_id=item.get("channel_id", ""),
+                            channel_name=item.get("channel_name", ""),
+                            thumbnail_url=item.get("thumbnail_url", ""),
+                            tags=item.get("tags", []),
+                            platform=source,
+                            keyword=kw,
+                            discovered_at=item.get("discovered_at", ""),
+                        ))
+                    return results
+            
+            # 실제 검색 실행
             if source in ("youtube", "google_videos"):
-                return self._ydl_searcher.search(source, kw, limit, self.get_full_info)
+                results = self._ydl_searcher.search(source, kw, limit, self.get_full_info)
             else:
-                return self._site_scraper.search(source, kw, limit)
+                results = self._site_scraper.search(source, kw, limit)
+            
+            # 캐시에 저장
+            if self._cache and results:
+                cache_data = [asdict(cr) for cr in results]
+                self._cache.save_search_results(kw, cache_data, source)
+                logger.debug(f"💾 캐시 저장: [{source}] '{kw}' ({len(results)}개)")
+            
+            return results
 
         # 병렬 실행
         with ThreadPoolExecutor(max_workers=max(1, ydl_workers + scrape_workers)) as executor:
@@ -578,6 +645,133 @@ class MultiSourceCrawler:
             logger.error(f"DB 저장 실패: {e}")
             return 0
 
+    def _crawl_async(
+        self,
+        keywords: List[str],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> tuple:
+        """
+        비동기 크롤러를 사용한 크롤링
+        
+        AsyncMultiSourceCrawler에 위임하여 asyncio+aiohttp 기반
+        비동기 크롤링을 수행합니다.
+        """
+        import asyncio
+        
+        try:
+            from ingestion.async_crawler import AsyncMultiSourceCrawler, AsyncCrawlConfig
+        except ImportError:
+            logger.error("비동기 크롤러 임포트 실패, 동기 모드로 전환")
+            self.async_mode = False
+            return self.crawl(keywords, progress_callback)
+        
+        start_time = time.time()
+        
+        config = AsyncCrawlConfig(
+            max_concurrent=self.max_workers * 25,
+            timeout_sec=30.0,
+            retry_count=3,
+            retry_delay_sec=2.0,
+        )
+        
+        async_crawler = AsyncMultiSourceCrawler(config=config)
+        
+        # asyncio 이벤트 루프 실행
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    async_results = pool.submit(
+                        asyncio.run,
+                        async_crawler.crawl_all_sources(
+                            keywords=keywords,
+                            sources=self.sources,
+                            progress_callback=progress_callback,
+                        )
+                    ).result()
+            else:
+                async_results = loop.run_until_complete(
+                    async_crawler.crawl_all_sources(
+                        keywords=keywords,
+                        sources=self.sources,
+                        progress_callback=progress_callback,
+                    )
+                )
+        except RuntimeError:
+            async_results = asyncio.run(
+                async_crawler.crawl_all_sources(
+                    keywords=keywords,
+                    sources=self.sources,
+                    progress_callback=progress_callback,
+                )
+            )
+        
+        # AsyncCrawlResult → CrawlResult 변환
+        stats = CrawlStats()
+        all_results: List[CrawlResult] = []
+        
+        for async_result in async_results:
+            stats.total_searched += 1
+            
+            if async_result.error:
+                stats.total_errors += 1
+                continue
+            
+            for item in async_result.results:
+                video_id = item.get("video_id", "")
+                
+                # 중복 체크
+                if video_id in self._seen_ids:
+                    stats.total_duplicates += 1
+                    continue
+                self._seen_ids.add(video_id)
+                
+                title = item.get("title", "")
+                description = item.get("description", "")
+                duration_sec = item.get("duration_sec")
+                
+                # 콘텐츠 필터
+                if self.content_filter and not _passes_content_filter(title, description):
+                    stats.total_filtered += 1
+                    continue
+                
+                # 길이 필터
+                if not _passes_duration_filter(duration_sec, self.min_duration_sec, self.max_duration_sec):
+                    stats.total_filtered += 1
+                    continue
+                
+                cr = CrawlResult(
+                    video_id=video_id,
+                    url=item.get("url", ""),
+                    title=title,
+                    description=description,
+                    duration_sec=duration_sec,
+                    view_count=item.get("view_count"),
+                    channel_id=item.get("channel_id", ""),
+                    channel_name=item.get("channel_name", ""),
+                    thumbnail_url=item.get("thumbnail_url", ""),
+                    tags=item.get("tags", []),
+                    platform=async_result.source,
+                    keyword=async_result.keyword,
+                    discovered_at=datetime.now(timezone.utc).isoformat(),
+                )
+                all_results.append(cr)
+                stats.total_found += 1
+                stats.by_source[async_result.source] = stats.by_source.get(async_result.source, 0) + 1
+                stats.by_keyword[async_result.keyword] = stats.by_keyword.get(async_result.keyword, 0) + 1
+                
+                if stats.total_found >= self.max_results:
+                    break
+            
+            if stats.total_found >= self.max_results:
+                break
+        
+        stats.elapsed_sec = time.time() - start_time
+        logger.info(f"⚡ [async] {stats.summary()}")
+        
+        return all_results, stats
+
 
 # ============================================================
 # CLI
@@ -603,6 +797,10 @@ def main():
     parser.add_argument("--max-duration", type=int, default=1200)
     parser.add_argument("--full-info", action="store_true")
     parser.add_argument("--no-filter", action="store_true")
+    parser.add_argument(
+        "--async", dest="async_mode", action="store_true",
+        help="비동기 크롤링 모드 사용 (aiohttp 기반, 더 빠름)"
+    )
 
     args = parser.parse_args()
 
@@ -617,6 +815,7 @@ def main():
         min_duration_sec=args.min_duration,
         max_duration_sec=args.max_duration,
         content_filter=not args.no_filter,
+        async_mode=args.async_mode,
     )
 
     results, stats = crawler.crawl(keywords)

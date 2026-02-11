@@ -2,7 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # 파일 경로 예시
-file_path = 'data/episodes/2dqh3OLxt6E_episode.npz'
+file_path = 'data/episodes/c6mrcNEFBoA_episode.npz'
 
 # npz 파일 로드
 data = np.load(file_path)
