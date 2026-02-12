@@ -36,7 +36,7 @@ def worker_loop(config: WorkerConfig):
     
     Redis 큐에서 키워드를 가져와 크롤링을 수행합니다.
     """
-    from queue.task_queue import CrawlTaskQueue
+    from task_queue.task_queue import CrawlTaskQueue
     from ingestion.multi_source_crawler import MultiSourceCrawler
     
     worker_id = config.worker_id
@@ -115,7 +115,7 @@ def run_workers(num_workers: int = None, keywords: List[str] = None, **kwargs):
         keywords: 크롤링할 키워드 목록
         **kwargs: WorkerConfig 추가 옵션
     """
-    from queue.task_queue import CrawlTaskQueue
+    from task_queue.task_queue import CrawlTaskQueue
     
     # CPU 코어 수 자동 감지
     if num_workers is None:

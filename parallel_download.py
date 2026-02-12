@@ -59,9 +59,8 @@ def download_single(
     output_dir: Path,
     timeout: int = 300,
 ) -> DownloadResult:
-    """단일 비디오 다운로드"""
-    import subprocess
-    import shutil
+    """단일 비디오 다운로드 (yt-dlp Python API 사용)"""
+    import yt_dlp
     
     start_time = time.time()
     output_path = output_dir / f"{video_id}.mp4"
@@ -77,43 +76,26 @@ def download_single(
             skipped=True,
         )
     
-    # yt-dlp 경로 찾기
-    yt_dlp_path = shutil.which("yt-dlp")
-    if not yt_dlp_path:
-        # venv 내 yt-dlp 탐색 (Linux/Mac/Windows)
-        venv_bin = Path(sys.executable).parent
-        for name in ("yt-dlp", "yt-dlp.exe"):
-            candidate = venv_bin / name
-            if candidate.exists():
-                yt_dlp_path = str(candidate)
-                break
-    
-    if not yt_dlp_path:
-        return DownloadResult(
-            video_id=video_id,
-            url=url,
-            success=False,
-            error="yt-dlp not found",
-        )
+    # Deno 런타임 경로를 PATH에 추가
+    deno_dir = Path.home() / ".deno" / "bin"
+    if deno_dir.exists() and str(deno_dir) not in os.environ.get("PATH", ""):
+        os.environ["PATH"] = str(deno_dir) + os.pathsep + os.environ.get("PATH", "")
     
     try:
-        cmd = [
-            yt_dlp_path,
-            "-f", "best[height<=720]",
-            "-o", str(output_path),
-            "--no-playlist",
-            "--quiet",
-            url,
-        ]
+        ydl_opts = {
+            "format": "best[height<=720]",
+            "outtmpl": str(output_path),
+            "no_playlist": True,
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": min(timeout, 60),
+            "retries": 2,
+        }
         
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
         
-        if result.returncode == 0 and output_path.exists():
+        if output_path.exists():
             duration = time.time() - start_time
             return DownloadResult(
                 video_id=video_id,
@@ -128,22 +110,15 @@ def download_single(
                 video_id=video_id,
                 url=url,
                 success=False,
-                error=result.stderr[:500] if result.stderr else "Unknown error",
+                error="Download completed but file not found",
             )
             
-    except subprocess.TimeoutExpired:
-        return DownloadResult(
-            video_id=video_id,
-            url=url,
-            success=False,
-            error="Timeout",
-        )
     except Exception as e:
         return DownloadResult(
             video_id=video_id,
             url=url,
             success=False,
-            error=str(e),
+            error=str(e)[:500],
         )
 
 
@@ -276,12 +251,18 @@ def save_results_to_db(results: List[DownloadResult], videos: List[Dict[str, str
             if not result.success:
                 continue
             
+            info = video_info.get(result.video_id, {})
+            
             # 이미 존재하는지 확인
             existing = session.query(Video).filter_by(video_id=result.video_id).first()
             if existing:
+                # local_path 업데이트
+                existing.local_path = result.video_path
+                existing.downloaded_at = datetime.now()
+                existing.status = "downloaded"
+                saved += 1
                 continue
             
-            info = video_info.get(result.video_id, {})
             video = Video(
                 video_id=result.video_id,
                 platform="youtube",

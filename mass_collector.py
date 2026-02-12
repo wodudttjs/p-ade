@@ -103,6 +103,7 @@ class PipelineConfig:
     # 기타
     dry_run: bool = False
     resume: bool = True  # 이전 진행 이어받기
+    custom_keywords: Optional[List[str]] = None  # CLI에서 직접 지정한 키워드
     
     @property
     def crawl_multiplier(self) -> float:
@@ -256,11 +257,14 @@ class MassCollector:
         start = time.time()
 
         # 키워드 생성
-        gen = KeywordGenerator(
-            languages=self.config.languages,
-            max_keywords=200,
-        )
-        keywords = gen.get_flat_keywords(max_count=50)
+        if self.config.custom_keywords:
+            keywords = self.config.custom_keywords
+        else:
+            gen = KeywordGenerator(
+                languages=self.config.languages,
+                max_keywords=200,
+            )
+            keywords = gen.get_flat_keywords(max_count=50)
 
         print(f"  🔑 {len(keywords)}개 키워드 생성됨")
         for i, kw in enumerate(keywords[:10], 1):
@@ -323,7 +327,7 @@ class MassCollector:
     def _crawl_multiprocess(self, keywords: List[str], start: float) -> StageResult:
         """멀티프로세스 크롤링 (Task 2.1 통합)"""
         from workers.crawl_worker import run_workers
-        from queue.task_queue import CrawlTaskQueue
+        from task_queue.task_queue import CrawlTaskQueue
 
         print(f"  🏭 멀티프로세스 모드 (워커: {self.config.crawl_workers}개)")
 
@@ -847,6 +851,10 @@ def main():
         quality_filter=not args.no_quality_filter,
         quality_threshold=args.quality_threshold,
     )
+
+    # 커스텀 키워드 적용
+    if args.keywords:
+        config.custom_keywords = [k.strip() for k in args.keywords.split(",")]
 
     collector = MassCollector(config)
 

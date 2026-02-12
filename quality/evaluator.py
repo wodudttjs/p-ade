@@ -373,13 +373,47 @@ class QualityStats:
     })
     total: int = 0
     passed: int = 0
+    _redis_client: Any = field(default=None, repr=False)
+    
+    def __post_init__(self):
+        """Redis 연결 시도 (선택적)"""
+        if self._redis_client is None:
+            try:
+                import redis
+                r = redis.Redis(host="localhost", port=6379, decode_responses=True, socket_timeout=2)
+                r.ping()
+                self._redis_client = r
+            except Exception:
+                self._redis_client = None
     
     def record(self, result: EvaluationResult):
-        """결과 기록"""
+        """결과 기록 + Redis 동기화"""
         self.grades[result.grade.value] += 1
         self.total += 1
         if result.passed:
             self.passed += 1
+        
+        # Redis에 통계 동기화
+        self._publish_to_redis(result)
+    
+    def _publish_to_redis(self, result: EvaluationResult):
+        """Redis에 품질 통계 업데이트"""
+        if self._redis_client is None:
+            return
+        
+        try:
+            pipe = self._redis_client.pipeline()
+            pipe.hset("pade:quality_stats", "total", self.total)
+            pipe.hset("pade:quality_stats", "passed", self.passed)
+            pipe.hset("pade:quality_stats", f"grade_{result.grade.value}", 
+                      self.grades[result.grade.value])
+            pipe.hset("pade:quality_stats", "pass_rate", 
+                      f"{self.pass_rate:.1f}")
+            pipe.hset("pade:quality_stats", "last_video_id", result.video_id)
+            pipe.hset("pade:quality_stats", "last_score", f"{result.total_score:.1f}")
+            pipe.execute()
+        except Exception as e:
+            logger.debug(f"Redis 품질 통계 업데이트 실패 (무시): {e}")
     
     @property
     def pass_rate(self) -> float:

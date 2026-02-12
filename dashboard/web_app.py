@@ -1571,6 +1571,86 @@ def api_pipeline_stop():
     return jsonify({"success": True, "message": "Pipeline stopped"})
 
 
+@app.route("/api/control/<action>", methods=["POST"])
+def api_pipeline_control(action):
+    """
+    파이프라인 제어 (Redis pub/sub 기반)
+    start, stop, restart, pause, resume
+    """
+    valid_actions = {"start", "stop", "restart", "pause", "resume"}
+    if action not in valid_actions:
+        return jsonify({"error": f"Invalid action: {action}. Valid: {list(valid_actions)}"}), 400
+
+    r = get_redis_client()
+    if not r:
+        return jsonify({"error": "Redis 연결 실패"}), 503
+
+    try:
+        status_map = {
+            "start": "running", "stop": "stopped", "restart": "restarting",
+            "pause": "paused", "resume": "running",
+        }
+        r.set("pade:pipeline_status", status_map[action])
+        r.publish("pade:control", action)
+
+        status = r.get("pade:pipeline_status") or "unknown"
+        return jsonify({"status": "ok", "action": action, "pipeline_status": status})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/control/status")
+def api_control_status():
+    """파이프라인 현재 상태 (Redis 기반)"""
+    r = get_redis_client()
+    if not r:
+        return jsonify({"pipeline_status": "unknown", "connected": False})
+    try:
+        status = r.get("pade:pipeline_status") or "idle"
+        return jsonify({"pipeline_status": status, "connected": True})
+    except Exception:
+        return jsonify({"pipeline_status": "unknown", "connected": False})
+
+
+@app.route("/api/stream/logs")
+def api_stream_logs():
+    """
+    실시간 로그 스트리밍 (Server-Sent Events)
+    Redis pub/sub 'pade:logs' 채널 구독
+    """
+    import time as _time
+
+    def event_stream():
+        r = get_redis_client()
+        if not r:
+            yield "data: [ERROR] Redis 연결 실패\n\n"
+            return
+
+        pubsub = r.pubsub()
+        pubsub.subscribe("pade:logs")
+        try:
+            while True:
+                message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    data = message["data"]
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8", errors="replace")
+                    yield f"data: {data}\n\n"
+                else:
+                    # keepalive
+                    yield ": heartbeat\n\n"
+                _time.sleep(0.1)
+        except GeneratorExit:
+            pass
+        finally:
+            pubsub.unsubscribe("pade:logs")
+            pubsub.close()
+
+    from flask import Response
+    return Response(event_stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.route("/api/jobs")
 def api_jobs():
     """작업 목록"""

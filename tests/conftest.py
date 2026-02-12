@@ -3,10 +3,17 @@
 """
 
 import os
+import sys
 import pytest
 import tempfile
 import shutil
 from pathlib import Path
+
+# queue/ → task_queue/로 이름 변경하여 stdlib 충돌 해결됨
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
