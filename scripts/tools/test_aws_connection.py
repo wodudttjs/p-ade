@@ -11,7 +11,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # 프로젝트 루트 설정
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 # .env 로드

@@ -2,7 +2,7 @@
 import sqlite3
 from pathlib import Path
 
-db_path = Path(__file__).parent / "data" / "pade.db"
+db_path = Path(__file__).parent.parent.parent / "data" / "pade.db"
 print(f"📁 DB 경로: {db_path}")
 print(f"📁 존재 여부: {db_path.exists()}")
 

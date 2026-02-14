@@ -6,7 +6,7 @@
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from pathlib import Path
 import argparse
@@ -85,6 +85,7 @@ def main():
     parser.add_argument("--fps", type=float, default=30.0, help="출력 FPS")
     parser.add_argument("--max-frames", type=int, default=None, help="최대 프레임 수")
     parser.add_argument("--all", action="store_true", help="data/raw의 모든 영상 처리")
+    parser.add_argument("--no-gpu-streams", action="store_true", help="GPU 3-Stream 비활성화")
     
     args = parser.parse_args()
     
@@ -111,10 +112,44 @@ def main():
         print(f"📹 영상 {len(videos)}개 발견")
         print()
         
-        for i, video_path in enumerate(videos, 1):
-            print(f"[{i}/{len(videos)}] {video_path.name}")
-            extract_poses(video_path, output_dir, args.fps, args.max_frames)
-            print()
+        # GPU 3-Stream 병렬 처리 시도
+        gpu_used = False
+        if not getattr(args, 'no_gpu_streams', False):
+            try:
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                print(f"🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+                
+                processor = stream_mgr.make_pose_extract_processor(
+                    output_fps=args.fps,
+                    max_frames=args.max_frames,
+                    output_dir=str(output_dir),
+                )
+                video_paths = [str(v) for v in videos]
+                results = stream_mgr.process_batch(video_paths, processor)
+                
+                for r in results:
+                    if r and r.get("success"):
+                        if r.get("status") == "skipped":
+                            print(f"  ⏭️  {r.get('video_id', '?')}: {r.get('msg', 'skipped')}")
+                        else:
+                            print(f"  ✅ {r.get('video_id', '?')}: {r.get('frames', 0)} frames")
+                    else:
+                        print(f"  ❌ {r.get('video_id', '?')}: {r.get('error', 'unknown')}")
+                
+                stream_mgr.print_stats()
+                gpu_used = True
+            except Exception as e:
+                print(f"⚠️ GPU 3-Stream 실패, 순차 모드로 폴백: {e}")
+        
+        # 폴백: 순차 처리
+        if not gpu_used:
+            for i, video_path in enumerate(videos, 1):
+                print(f"[{i}/{len(videos)}] {video_path.name}")
+                extract_poses(video_path, output_dir, args.fps, args.max_frames)
+                print()
     else:
         if not args.video:
             # 기본: data/raw의 첫 번째 영상

@@ -75,6 +75,8 @@ pipeline_state = {
         "crawl": 0,
         "download": 0,
         "detect": 0,
+        "build_il": 0,
+        "quality": 0,
         "upload": 0,
     },
     "logs": [],
@@ -82,6 +84,11 @@ pipeline_state = {
     "process": None,
     "target_count": 0,
     "processed_count": 0,
+    # ── 누적 히스토리 (반복 간 유지) ──
+    "iteration": 0,              # 현재까지의 반복 횟수
+    "cumulative_logs": [],       # 전체 누적 로그 (최근 2000줄 유지)
+    "last_progress": {},         # 마지막 완료된 반복의 progress 스냅샷
+    "iteration_history": [],     # 반복별 요약 [{iteration, started, completed, stages_done, ...}]
 }
 
 # 설정 상태
@@ -94,8 +101,33 @@ settings_state = {
     "detect_confidence": 0.5,
 }
 
-# 작업 히스토리
-jobs_history = []
+# 작업 히스토리 — 파일 기반 영속화
+JOBS_HISTORY_PATH = PROJECT_ROOT / "data" / "jobs_history.json"
+
+
+def _load_jobs_history() -> list:
+    """파일에서 작업 히스토리 로드"""
+    if JOBS_HISTORY_PATH.exists():
+        try:
+            with open(JOBS_HISTORY_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+
+def _save_jobs_history():
+    """작업 히스토리를 파일에 저장"""
+    try:
+        JOBS_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # 최근 200개만 유지
+        with open(JOBS_HISTORY_PATH, "w", encoding="utf-8") as f:
+            json.dump(jobs_history[:200], f, ensure_ascii=False, indent=1)
+    except Exception:
+        pass
+
+
+jobs_history = _load_jobs_history()
 
 
 def get_db_connection():
@@ -117,6 +149,7 @@ def get_file_stats() -> Dict[str, int]:
         "poses": 0,
         "total_size_mb": 0,
         "uploaded": 0,
+        "il_episodes": 0,
     }
     
     try:
@@ -131,6 +164,18 @@ def get_file_stats() -> Dict[str, int]:
             npz_files = list(episodes_dir.glob("*.npz"))
             stats["episodes"] = len(npz_files)
             stats["total_size_mb"] += sum(f.stat().st_size for f in npz_files) / (1024 * 1024)
+            
+            # IL 에피소드 카운트 (states 키가 있는 npz)
+            import numpy as np
+            il_count = 0
+            for f in npz_files:
+                try:
+                    d = np.load(str(f), allow_pickle=True)
+                    if "states" in d and "actions" in d:
+                        il_count += 1
+                except Exception:
+                    pass
+            stats["il_episodes"] = il_count
         
         poses_dir = data_dir / "poses"
         if poses_dir.exists():
@@ -375,7 +420,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             gap: 15px;
             margin-bottom: 20px;
         }
-        .stage-item { text-align: center; }
+        .stage-item { text-align: center; transition: opacity 0.3s; }
         .stage-label { font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; }
         .stage-progress {
             height: 8px;
@@ -392,6 +437,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         .stage-progress .bar.download { background: var(--accent-purple); }
         .stage-progress .bar.detect { background: var(--accent-yellow); }
         .stage-progress .bar.upload { background: var(--accent-green); }
+        @keyframes pulse-bar {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
         .total-progress {
             height: 12px;
             background: var(--bg-card);
@@ -564,28 +613,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             <section class="control-panel">
                 <div class="control-grid">
                     <div class="control-box">
-                        <h4>파이프라인 제어</h4>
-                        <div class="form-group">
-                            <label class="form-label">대상 비디오 수</label>
-                            <input type="number" class="form-control-dark" id="target-count" value="10" min="1" max="1000">
-                        </div>
-                        <div class="btn-group" style="margin-bottom: 10px;">
-                            <button class="btn-action btn-success" id="btn-start-all" onclick="startPipeline('all')">
-                                <i class="bi bi-play-fill"></i> 모두 실행
-                            </button>
-                            <button class="btn-action btn-danger" id="btn-stop" onclick="stopPipeline()" disabled>
-                                <i class="bi bi-stop-fill"></i> 중지
-                            </button>
-                        </div>
-                        <div class="btn-group">
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('crawl')">📡 크롤링</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('download')">📥 다운로드</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('detect')">🔍 감지</button>
-                            <button class="btn-action btn-sm btn-secondary" onclick="startPipeline('upload')">☁️ 업로드</button>
-                        </div>
-                    </div>
-                    
-                    <div class="control-box">
                         <h4>파이프라인 진행 상황</h4>
                         <div class="progress-stages">
                             <div class="stage-item">
@@ -599,6 +626,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             <div class="stage-item">
                                 <div class="stage-label">🔍 감지</div>
                                 <div class="stage-progress"><div class="bar detect" id="progress-detect" style="width: 0%"></div></div>
+                            </div>
+                            <div class="stage-item">
+                                <div class="stage-label">🤖 모방학습</div>
+                                <div class="stage-progress"><div class="bar" id="progress-build-il" style="width: 0%; background: var(--accent-purple, #a78bfa);"></div></div>
+                            </div>
+                            <div class="stage-item">
+                                <div class="stage-label">📊 품질평가</div>
+                                <div class="stage-progress"><div class="bar" id="progress-quality" style="width: 0%; background: var(--accent-green, #34d399);"></div></div>
                             </div>
                             <div class="stage-item">
                                 <div class="stage-label">☁️ 업로드</div>
@@ -644,6 +679,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <div class="value" id="card-uploaded">0</div>
                         <div class="label">S3에 업로드됨</div>
                     </div>
+                    <div class="stat-card">
+                        <div class="icon" style="background: rgba(167,139,250,0.2); color: #a78bfa;"><i class="bi bi-robot"></i></div>
+                        <div class="value" id="card-il-episodes">0</div>
+                        <div class="label">IL 에피소드</div>
+                    </div>
                 </div>
                 
                 <div class="charts-grid">
@@ -666,6 +706,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                                 <div style="background: var(--accent-yellow); border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-uploaded"></div>
                                 <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">업로드됨</div>
                             </div>
+                            <div style="flex: 1; text-align: center;">
+                                <div style="background: #a78bfa; border-radius: 8px 8px 0 0; transition: height 0.3s;" id="chart-bar-il"></div>
+                                <div style="margin-top: 10px; font-size: 12px; color: var(--text-secondary);">IL 데이터</div>
+                            </div>
                         </div>
                     </div>
                     
@@ -677,6 +721,72 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                                 <div class="activity-content">
                                     <div class="activity-title">대시보드 시작됨</div>
                                     <div class="activity-time">방금</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3><i class="bi bi-gpu-card"></i> GPU 사용률 (실시간)</h3>
+                        <div style="display:flex;align-items:center;gap:20px;padding:10px 0;">
+                            <div style="flex:1;">
+                                <div style="display:flex;justify-content:space-between;margin-bottom:6px;">
+                                    <span style="font-size:13px;color:var(--text-secondary);">GPU 연산</span>
+                                    <span id="gpu-util-text" style="font-weight:600;color:var(--accent-green);">0%</span>
+                                </div>
+                                <div style="height:14px;background:var(--bg-dark);border-radius:7px;overflow:hidden;">
+                                    <div id="gpu-util-bar" style="height:100%;background:linear-gradient(90deg,var(--accent-green),var(--accent-blue));border-radius:7px;transition:width 0.5s;width:0%;"></div>
+                                </div>
+                                <div style="display:flex;justify-content:space-between;margin-top:12px;margin-bottom:6px;">
+                                    <span style="font-size:13px;color:var(--text-secondary);">GPU 메모리</span>
+                                    <span id="gpu-mem-text" style="font-weight:600;color:var(--accent-purple);">0 / 0 MB</span>
+                                </div>
+                                <div style="height:14px;background:var(--bg-dark);border-radius:7px;overflow:hidden;">
+                                    <div id="gpu-mem-bar" style="height:100%;background:linear-gradient(90deg,var(--accent-purple),var(--accent-red));border-radius:7px;transition:width 0.5s;width:0%;"></div>
+                                </div>
+                            </div>
+                            <div style="text-align:center;min-width:100px;">
+                                <div id="gpu-name" style="font-size:12px;color:var(--text-secondary);margin-top:8px;">—</div>
+                            </div>
+                        </div>
+                        <div style="margin-top:15px;">
+                            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">GPU 사용률 추이 (최근 60초)</div>
+                            <div style="display:flex;align-items:flex-end;gap:2px;height:80px;" id="gpu-history-chart"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-card">
+                        <h3><i class="bi bi-database"></i> Redis 캐시 상태</h3>
+                        <div id="cache-stats-panel" style="padding:10px 0;">
+                            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                                <div class="stat-row"><span class="stat-label">🔌 연결</span><span class="stat-value" id="cache-connected">—</span></div>
+                                <div class="stat-row"><span class="stat-label">🔍 검색 히트율</span><span class="stat-value" id="cache-search-hit">—</span></div>
+                                <div class="stat-row"><span class="stat-label">📹 비디오 히트율</span><span class="stat-value" id="cache-video-hit">—</span></div>
+                                <div class="stat-row"><span class="stat-label">🔑 검색 키</span><span class="stat-value" id="cache-search-keys">—</span></div>
+                                <div class="stat-row"><span class="stat-label">🔑 비디오 키</span><span class="stat-value" id="cache-video-keys">—</span></div>
+                                <div class="stat-row"><span class="stat-label">💾 메모리</span><span class="stat-value" id="cache-memory">—</span></div>
+                            </div>
+                        </div>
+                        <div style="margin-top:15px;">
+                            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">캐시 히트/미스 비율</div>
+                            <div style="display:flex;gap:15px;align-items:center;" id="cache-ratio-chart">
+                                <div style="flex:1;">
+                                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                                        <span style="color:var(--accent-green);">히트</span><span id="cache-hits-count" style="color:var(--text-secondary);">0</span>
+                                    </div>
+                                    <div style="height:10px;background:var(--bg-dark);border-radius:5px;overflow:hidden;">
+                                        <div id="cache-hit-ratio-bar" style="height:100%;background:var(--accent-green);border-radius:5px;width:0%;transition:width 0.5s;"></div>
+                                    </div>
+                                </div>
+                                <div style="flex:1;">
+                                    <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:4px;">
+                                        <span style="color:var(--accent-red);">미스</span><span id="cache-misses-count" style="color:var(--text-secondary);">0</span>
+                                    </div>
+                                    <div style="height:10px;background:var(--bg-dark);border-radius:5px;overflow:hidden;">
+                                        <div id="cache-miss-ratio-bar" style="height:100%;background:var(--accent-red);border-radius:5px;width:0%;transition:width 0.5s;"></div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -696,12 +806,47 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <!-- Jobs Page -->
         <div class="page-container" id="page-jobs">
             <section class="dashboard-content">
-                <div class="chart-card">
-                    <h3><i class="bi bi-list-task"></i> 파이프라인 작업
-                        <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="refreshJobs()">
-                            <i class="bi bi-arrow-clockwise"></i> 새로고침
-                        </button>
+                <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-play-circle"></i></div>
+                        <div class="value" id="jobs-current-stage">—</div>
+                        <div class="label">현재 실행 단계</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-check2-all"></i></div>
+                        <div class="value" id="jobs-completed-count">0</div>
+                        <div class="label">완료된 단계</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-clock-history"></i></div>
+                        <div class="value" id="jobs-elapsed">—</div>
+                        <div class="label">경과 시간</div>
+                    </div>
+                </div>
+                
+                <div class="chart-card" style="margin-bottom: 20px;">
+                    <h3><i class="bi bi-diagram-3"></i> 파이프라인 단계별 상태</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;padding:15px 0;" id="jobs-stage-cards"></div>
+                </div>
+                
+                <div class="chart-card" style="margin-bottom: 20px;">
+                    <h3><i class="bi bi-terminal-fill"></i> 실시간 파이프라인 로그
+                        <div style="margin-left: auto; display: flex; gap: 10px;">
+                            <button class="btn-action btn-sm btn-secondary" onclick="clearJobLogs()">
+                                <i class="bi bi-trash"></i> 로그 지우기
+                            </button>
+                            <button class="btn-action btn-sm btn-primary" onclick="refreshJobs()">
+                                <i class="bi bi-arrow-clockwise"></i> 새로고침
+                            </button>
+                        </div>
                     </h3>
+                    <div class="log-content" id="jobs-log-content" style="max-height:500px;font-size:11.5px;line-height:1.5;">
+                        <div class="log-line info">파이프라인 로그를 기다리는 중...</div>
+                    </div>
+                </div>
+                
+                <div class="chart-card">
+                    <h3><i class="bi bi-list-task"></i> 작업 히스토리</h3>
                     <table class="data-table" id="jobs-table">
                         <thead>
                             <tr><th>작업 ID</th><th>단계</th><th>상태</th><th>시작됨</th><th>진행률</th><th>작업</th></tr>
@@ -715,29 +860,47 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         <!-- Videos Page -->
         <div class="page-container" id="page-videos">
             <section class="dashboard-content">
+                <div class="stats-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 20px;">
+                    <div class="stat-card">
+                        <div class="icon blue"><i class="bi bi-film"></i></div>
+                        <div class="value" id="video-total-count">0</div>
+                        <div class="label">전체 비디오 파일</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon green"><i class="bi bi-hdd"></i></div>
+                        <div class="value" id="video-total-size">0 MB</div>
+                        <div class="label">총 용량</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="icon yellow"><i class="bi bi-clock"></i></div>
+                        <div class="value" id="video-avg-size">0 MB</div>
+                        <div class="label">평균 파일 크기</div>
+                    </div>
+                </div>
+                
                 <div class="chart-card">
-                    <h3><i class="bi bi-film"></i> 비디오 목록
+                    <h3><i class="bi bi-film"></i> 비디오 파일 목록 (data/raw)
                         <div style="margin-left: auto; display: flex; gap: 10px;">
-                            <select class="form-control-dark" id="video-filter" style="width: 150px;" onchange="loadVideos()">
-                                <option value="">모든 상태</option>
-                                <option value="downloaded">다운로드 완료</option>
-                                <option value="processed">처리 완료</option>
-                                <option value="uploaded">업로드 완료</option>
-                                <option value="pending">대기 중</option>
-                                <option value="failed">실패</option>
+                            <input type="text" class="form-control-dark" id="video-search" placeholder="파일명 검색..." style="width:200px;" oninput="filterVideoTable()">
+                            <select class="form-control-dark" id="video-sort" style="width: 150px;" onchange="loadVideoFiles()">
+                                <option value="name">이름순</option>
+                                <option value="size_desc">크기 (큰순)</option>
+                                <option value="size_asc">크기 (작은순)</option>
+                                <option value="date_desc">최신순</option>
+                                <option value="date_asc">오래된순</option>
                             </select>
-                            <button class="btn-action btn-sm btn-danger" onclick="cleanupVideos()">
-                                <i class="bi bi-trash"></i> 정리
+                            <button class="btn-action btn-sm btn-primary" onclick="loadVideoFiles()">
+                                <i class="bi bi-arrow-clockwise"></i> 새로고침
                             </button>
                         </div>
                     </h3>
                     <table class="data-table">
                         <thead>
-                            <tr><th>ID</th><th>제목</th><th>길이</th><th>상태</th><th>크기</th><th>작업</th></tr>
+                            <tr><th>파일명</th><th>비디오 ID</th><th>크기</th><th>수정일</th><th>DB 상태</th><th>작업</th></tr>
                         </thead>
-                        <tbody id="videos-tbody"></tbody>
+                        <tbody id="video-files-tbody"></tbody>
                     </table>
-                    <div style="padding: 15px; text-align: center; color: var(--text-secondary);" id="videos-pagination"></div>
+                    <div style="padding: 15px; text-align: center; color: var(--text-secondary);" id="video-files-pagination"></div>
                 </div>
             </section>
         </div>
@@ -785,6 +948,36 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <div class="value" id="quality-rate">—</div>
                         <div class="label">성공률</div>
                     </div>
+                </div>
+                
+                <div class="charts-grid">
+                    <div class="chart-card">
+                        <h3><i class="bi bi-bar-chart"></i> 등급별 분포 (A~D: 통과, F: 실패)</h3>
+                        <div id="quality-grade-chart" style="height: 250px; display: flex; align-items: flex-end; gap: 15px; padding: 20px;">
+                            <p style="color: var(--text-secondary);">등급 데이터 로딩 중...</p>
+                        </div>
+                    </div>
+                    
+                    <div class="chart-card">
+                        <h3><i class="bi bi-clipboard-data"></i> 품질 메트릭 상세</h3>
+                        <div id="quality-metrics-detail" style="padding: 20px;">
+                            <p style="color: var(--text-secondary);">메트릭 데이터 로딩 중...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="chart-card">
+                    <h3><i class="bi bi-table"></i> 에피소드 품질 목록
+                        <button class="btn-action btn-sm btn-primary" style="margin-left: auto;" onclick="loadQuality()">
+                            <i class="bi bi-arrow-clockwise"></i> 새로고침
+                        </button>
+                    </h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr><th>비디오 ID</th><th>점수</th><th>등급</th><th>관절검출</th><th>동작자연</th><th>파지동작</th><th>안정성</th><th>커버리지</th><th>통과</th></tr>
+                        </thead>
+                        <tbody id="quality-episodes-tbody"></tbody>
+                    </table>
                 </div>
                 
                 <div class="chart-card">
@@ -976,6 +1169,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         let refreshInterval = null;
         let currentPage = 'overview';
         let modalCallback = null;
+        let gpuHistory = [];
+        const GPU_HISTORY_LEN = 60;
         
         document.addEventListener('DOMContentLoaded', () => {
             refreshData();
@@ -1001,7 +1196,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             document.getElementById('page-title').textContent = page.charAt(0).toUpperCase() + page.slice(1);
             
             if (page === 'jobs') refreshJobs();
-            else if (page === 'videos') loadVideos();
+            else if (page === 'videos') loadVideoFiles();
             else if (page === 'episodes') loadEpisodes();
             else if (page === 'quality') loadQuality();
             else if (page === 'ildata') loadILData();
@@ -1011,6 +1206,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function startAutoRefresh() {
             refreshInterval = setInterval(() => {
                 if (currentPage === 'overview') refreshData();
+                else if (currentPage === 'jobs') refreshJobs();
             }, 5000);
         }
         
@@ -1043,37 +1239,137 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 document.getElementById('card-storage').textContent = `${stats.files.total_size_mb.toFixed(1)} MB`;
                 document.getElementById('card-uploaded').textContent = stats.files.uploaded || 0;
                 
-                const maxVal = Math.max(stats.files.raw_videos, stats.files.poses, stats.files.episodes, stats.files.uploaded || 1, 1);
+                const ilCount = stats.files.il_episodes || 0;
+                document.getElementById('card-il-episodes').textContent = ilCount;
+                
+                const maxVal = Math.max(stats.files.raw_videos, stats.files.poses, stats.files.episodes, stats.files.uploaded || 1, ilCount, 1);
                 document.getElementById('chart-bar-videos').style.height = `${(stats.files.raw_videos / maxVal) * 180}px`;
                 document.getElementById('chart-bar-poses').style.height = `${(stats.files.poses / maxVal) * 180}px`;
                 document.getElementById('chart-bar-episodes').style.height = `${(stats.files.episodes / maxVal) * 180}px`;
                 document.getElementById('chart-bar-uploaded').style.height = `${((stats.files.uploaded || 0) / maxVal) * 180}px`;
+                document.getElementById('chart-bar-il').style.height = `${(ilCount / maxVal) * 180}px`;
                 
                 document.getElementById('last-update').textContent = `마지막 업데이트: ${new Date().toLocaleTimeString()}`;
                 
                 isRunning = pipeline.is_running;
                 updatePipelineUI(pipeline);
+                
+                // GPU & 캐시 정보 갱신
+                refreshGpuStats();
+                refreshCacheStats();
             } catch (error) {
                 console.error('Error refreshing data:', error);
             }
         }
         
+        async function refreshGpuStats() {
+            try {
+                const res = await fetch(`${API_BASE}/api/gpu`);
+                const gpu = await res.json();
+                const util = gpu.utilization || 0;
+                const memPct = gpu.memory_percent || 0;
+                
+                document.getElementById('gpu-util-text').textContent = `${util.toFixed(1)}%`;
+                document.getElementById('gpu-util-bar').style.width = `${util}%`;
+                const utilColor = util > 80 ? 'var(--accent-red)' : util > 50 ? 'var(--accent-yellow)' : 'var(--accent-green)';
+                document.getElementById('gpu-util-text').style.color = utilColor;
+                
+                document.getElementById('gpu-mem-text').textContent = `${gpu.memory_used_mb.toFixed(0)} / ${gpu.memory_total_mb.toFixed(0)} MB`;
+                document.getElementById('gpu-mem-bar').style.width = `${memPct}%`;
+                document.getElementById('gpu-name').textContent = gpu.name || 'N/A';
+                
+                // 히스토리 추가
+                gpuHistory.push(util);
+                if (gpuHistory.length > GPU_HISTORY_LEN) gpuHistory.shift();
+                
+                const chart = document.getElementById('gpu-history-chart');
+                const maxH = 80;
+                chart.innerHTML = gpuHistory.map(v => {
+                    const h = Math.max(2, (v / 100) * maxH);
+                    const c = v > 80 ? 'var(--accent-red)' : v > 50 ? 'var(--accent-yellow)' : 'var(--accent-green)';
+                    return `<div style="flex:1;height:${h}px;background:${c};border-radius:2px;min-width:2px;"></div>`;
+                }).join('');
+            } catch(e) {
+                document.getElementById('gpu-name').textContent = 'GPU 없음';
+            }
+        }
+        
+        async function refreshCacheStats() {
+            try {
+                const res = await fetch(`${API_BASE}/api/cache`);
+                const data = await res.json();
+                const c = data.current || {};
+                
+                document.getElementById('cache-connected').innerHTML = c.connected
+                    ? '<span style="color:var(--accent-green)">✅ 연결됨</span>'
+                    : '<span style="color:var(--accent-red)">❌ 미연결</span>';
+                document.getElementById('cache-search-hit').textContent = c.search_hit_rate != null ? `${c.search_hit_rate}%` : '—';
+                document.getElementById('cache-video-hit').textContent = c.video_hit_rate != null ? `${c.video_hit_rate}%` : '—';
+                document.getElementById('cache-search-keys').textContent = c.search_keys != null ? c.search_keys : '—';
+                document.getElementById('cache-video-keys').textContent = c.video_keys != null ? c.video_keys : '—';
+                document.getElementById('cache-memory').textContent = c.used_memory_mb != null ? `${c.used_memory_mb} MB` : '—';
+                
+                const hits = (c.search_hits || 0) + (c.video_hits || 0);
+                const misses = (c.search_misses || 0) + (c.video_misses || 0);
+                const total = hits + misses;
+                document.getElementById('cache-hits-count').textContent = hits;
+                document.getElementById('cache-misses-count').textContent = misses;
+                document.getElementById('cache-hit-ratio-bar').style.width = total > 0 ? `${(hits/total)*100}%` : '0%';
+                document.getElementById('cache-miss-ratio-bar').style.width = total > 0 ? `${(misses/total)*100}%` : '0%';
+            } catch(e) {
+                document.getElementById('cache-connected').innerHTML = '<span style="color:var(--accent-red)">오류</span>';
+            }
+        }
+        
         function updatePipelineUI(pipeline) {
-            document.getElementById('btn-start-all').disabled = pipeline.is_running;
-            document.getElementById('btn-stop').disabled = !pipeline.is_running;
+            // 파이프라인 제어 버튼이 제거되어 안전하게 처리
+            const btnStart = document.getElementById('btn-start-all');
+            const btnStop = document.getElementById('btn-stop');
+            if (btnStart) btnStart.disabled = pipeline.is_running;
+            if (btnStop) btnStop.disabled = !pipeline.is_running;
             
-            document.getElementById('progress-crawl').style.width = `${pipeline.progress.crawl}%`;
-            document.getElementById('progress-download').style.width = `${pipeline.progress.download}%`;
-            document.getElementById('progress-detect').style.width = `${pipeline.progress.detect}%`;
-            document.getElementById('progress-upload').style.width = `${pipeline.progress.upload}%`;
+            // 각 스테이지 진행률 업데이트
+            const stageIds = ['crawl', 'download', 'detect', 'build_il', 'quality', 'upload'];
+            const stageBarIds = {
+                'crawl': 'progress-crawl',
+                'download': 'progress-download',
+                'detect': 'progress-detect',
+                'build_il': 'progress-build-il',
+                'quality': 'progress-quality',
+                'upload': 'progress-upload',
+            };
             
-            const total = (pipeline.progress.crawl + pipeline.progress.download + pipeline.progress.detect + pipeline.progress.upload) / 4;
+            stageIds.forEach(stage => {
+                const bar = document.getElementById(stageBarIds[stage]);
+                if (!bar) return;
+                const pct = pipeline.progress[stage] || 0;
+                bar.style.width = `${pct}%`;
+                
+                // 현재 실행 중인 스테이지에 펄스 애니메이션
+                const stageItem = bar.closest('.stage-item');
+                if (pipeline.is_running && pipeline.current_stage === stage) {
+                    bar.style.width = pct > 0 ? `${pct}%` : '30%';
+                    bar.style.animation = 'pulse-bar 1.5s ease-in-out infinite';
+                    if (stageItem) stageItem.style.opacity = '1';
+                } else {
+                    bar.style.animation = 'none';
+                    if (stageItem) stageItem.style.opacity = pct > 0 ? '1' : '0.6';
+                }
+            });
+            
+            const total = stageIds.reduce((sum, s) => sum + (pipeline.progress[s] || 0), 0) / stageIds.length;
             document.getElementById('progress-total').style.width = `${total}%`;
             
-            let status = 'Ready';
-            if (pipeline.is_running) status = `실행 중: ${pipeline.current_stage || '초기화 중...'}`;
-            else if (total > 0 && total < 100) status = '일시 중지';
-            else if (total >= 100) status = '완료';
+            let status = '준비 완료';
+            const stageLabels = {
+                'crawl': '📡 크롤링', 'download': '📥 다운로드', 'detect': '🔍 GPU 감지',
+                'build_il': '🤖 모방학습 생성', 'quality': '📊 품질평가', 'upload': '☁️ 업로드'
+            };
+            if (pipeline.is_running) {
+                const label = stageLabels[pipeline.current_stage] || pipeline.current_stage || '초기화 중...';
+                status = `▶ 실행 중: ${label}`;
+            } else if (total > 0 && total < 100) status = '⏸ 대기 중 (다음 반복 준비)';
+            else if (total >= 100) status = '✅ 파이프라인 완료';
             document.getElementById('pipeline-status').textContent = status;
             
             if (pipeline.logs && pipeline.logs.length > 0) {
@@ -1097,7 +1393,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         
         async function startPipeline(stage) {
-            const target = document.getElementById('target-count').value;
+            const targetEl = document.getElementById('target-count');
+            const target = targetEl ? targetEl.value : 10;
             try {
                 addActivity('info', `파이프라인 시작: ${stage}...`);
                 const res = await fetch(`${API_BASE}/api/pipeline/start`, {
@@ -1129,79 +1426,170 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         
         async function refreshJobs() {
             try {
-                const res = await fetch(`${API_BASE}/api/jobs`);
-                const jobs = await res.json();
+                const pipelineRes = await fetch(`${API_BASE}/api/pipeline/status`);
+                const pipeline = await pipelineRes.json();
+                
+                // 현재 단계 표시
+                const stageLabels = {
+                    'crawl': '📡 크롤링', 'download': '📥 다운로드', 'detect': '🔍 GPU 감지',
+                    'build_il': '🤖 모방학습', 'quality': '📊 품질평가', 'upload': '☁️ 업로드'
+                };
+                const curStage = pipeline.current_stage;
+                const iterNum = pipeline.iteration || 0;
+                
+                if (pipeline.is_running) {
+                    document.getElementById('jobs-current-stage').textContent = 
+                        `▶ ${stageLabels[curStage] || curStage || '초기화 중...'} (반복 #${iterNum})`;
+                } else {
+                    document.getElementById('jobs-current-stage').textContent = 
+                        iterNum > 0 ? `대기 중 (${iterNum}회 완료)` : '대기 중';
+                }
+                
+                // progress: 실행 중이면 현재, 아니면 마지막 완료된 반복 사용
+                const displayProgress = pipeline.is_running ? pipeline.progress : 
+                    (pipeline.last_progress && Object.keys(pipeline.last_progress).length > 0 ? pipeline.last_progress : pipeline.progress);
+                
+                // 완료 단계 카운트
+                const allStages = ['crawl','download','detect','build_il','quality','upload'];
+                const completed = allStages.filter(s => (displayProgress[s] || 0) >= 100).length;
+                document.getElementById('jobs-completed-count').textContent = `${completed}/${allStages.length}`;
+                
+                // 경과 시간
+                if (pipeline.started_at && pipeline.is_running) {
+                    const started = new Date(pipeline.started_at);
+                    const elapsed = Math.floor((new Date() - started) / 1000);
+                    const mm = Math.floor(elapsed / 60);
+                    const ss = elapsed % 60;
+                    document.getElementById('jobs-elapsed').textContent = `${mm}분 ${ss}초`;
+                } else {
+                    document.getElementById('jobs-elapsed').textContent = 
+                        iterNum > 0 ? `마지막 반복 #${iterNum} 완료` : '—';
+                }
+                
+                // 단계별 카드 — 대기 중에도 마지막 progress 보존
+                const cardsDiv = document.getElementById('jobs-stage-cards');
+                cardsDiv.innerHTML = allStages.map(s => {
+                    const pct = displayProgress[s] || 0;
+                    const isCurrent = pipeline.is_running && curStage === s;
+                    const isDone = pct >= 100;
+                    const borderColor = isCurrent ? 'var(--accent-blue)' : isDone ? 'var(--accent-green)' : 'var(--border-color)';
+                    const bg = isCurrent ? 'rgba(88,166,255,0.08)' : isDone ? 'rgba(63,185,80,0.05)' : 'var(--bg-dark)';
+                    const icon = isDone ? '✅' : isCurrent ? '▶️' : '⏸';
+                    return `<div style="flex:1;min-width:130px;background:${bg};border:2px solid ${borderColor};border-radius:10px;padding:12px;text-align:center;">
+                        <div style="font-size:18px;margin-bottom:4px;">${icon}</div>
+                        <div style="font-size:12px;font-weight:600;">${stageLabels[s] || s}</div>
+                        <div style="height:6px;background:var(--bg-card);border-radius:3px;margin-top:8px;overflow:hidden;">
+                            <div style="height:100%;width:${pct}%;background:${isDone?'var(--accent-green)':'var(--accent-blue)'};border-radius:3px;${isCurrent?'animation:pulse-bar 1.5s ease-in-out infinite;':''}"></div>
+                        </div>
+                        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px;">${pct}%</div>
+                    </div>`;
+                }).join('');
+                
+                // 실시간 로그 (파이프라인 터미널 출력)
+                const logContent = document.getElementById('jobs-log-content');
+                if (pipeline.logs && pipeline.logs.length > 0) {
+                    logContent.innerHTML = pipeline.logs.slice(-80).map(log => {
+                        let cls = '';
+                        if (log.includes('ERROR') || log.includes('❌') || log.includes('실패')) cls = 'error';
+                        else if (log.includes('SUCCESS') || log.includes('✅') || log.includes('완료')) cls = 'success';
+                        else if (log.includes('WARN') || log.includes('⚠') || log.includes('스킵')) cls = 'warning';
+                        else if (log.includes('INFO') || log.includes('🔍') || log.includes('📥') || log.includes('🔑') || log.includes('📌') || log.includes('🗄')) cls = 'info';
+                        return `<div class="log-line ${cls}">${escapeHtml(log)}</div>`;
+                    }).join('');
+                    logContent.scrollTop = logContent.scrollHeight;
+                }
+                
+                // 작업 히스토리 테이블
+                const jobsRes = await fetch(`${API_BASE}/api/jobs`);
+                const jobs = await jobsRes.json();
                 const tbody = document.getElementById('jobs-tbody');
                 if (jobs.length === 0) {
                     tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">작업이 없습니다</td></tr>';
-                    return;
+                } else {
+                    tbody.innerHTML = jobs.map(job => `
+                        <tr>
+                            <td>${job.id}</td>
+                            <td>${job.stage}</td>
+                            <td><span class="badge badge-${job.status === 'completed' ? 'success' : job.status === 'running' ? 'info' : job.status === 'failed' ? 'danger' : 'secondary'}">${job.status}</span></td>
+                            <td>${job.started_at || '—'}</td>
+                            <td>${job.progress}%</td>
+                            <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">로그</button></td>
+                        </tr>
+                    `).join('');
                 }
-                tbody.innerHTML = jobs.map(job => `
-                    <tr>
-                        <td>${job.id}</td>
-                        <td>${job.stage}</td>
-                        <td><span class="badge badge-${job.status === 'completed' ? 'success' : job.status === 'running' ? 'info' : job.status === 'failed' ? 'danger' : 'secondary'}">${job.status}</span></td>
-                        <td>${job.started_at || '—'}</td>
-                        <td>${job.progress}%</td>
-                        <td><button class="btn-action btn-sm btn-secondary" onclick="viewJobLogs('${job.id}')">로그</button></td>
-                    </tr>
-                `).join('');
             } catch (error) {
                 console.error('Error loading jobs:', error);
             }
+        }
+        
+        function clearJobLogs() {
+            document.getElementById('jobs-log-content').innerHTML = '<div class="log-line info">로그 초기화됨</div>';
         }
         
         function viewJobLogs(jobId) {
             showModal('작업 로그', `<div class="log-content" style="max-height: 300px;">작업 ${jobId}의 로그 로드 중...</div>`);
         }
         
-        async function loadVideos() {
+        async function loadVideoFiles() {
             try {
-                const filter = document.getElementById('video-filter').value;
-                const res = await fetch(`${API_BASE}/api/videos?status=${filter}`);
+                const sort = document.getElementById('video-sort').value;
+                const res = await fetch(`${API_BASE}/api/videos/files?sort=${sort}`);
                 const data = await res.json();
-                const tbody = document.getElementById('videos-tbody');
-                if (data.videos.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">비디오가 없습니다</td></tr>';
+                
+                document.getElementById('video-total-count').textContent = data.total || 0;
+                document.getElementById('video-total-size').textContent = data.total_size_mb ? `${data.total_size_mb.toFixed(1)} MB` : '0 MB';
+                document.getElementById('video-avg-size').textContent = data.avg_size_mb ? `${data.avg_size_mb.toFixed(1)} MB` : '0 MB';
+                
+                const tbody = document.getElementById('video-files-tbody');
+                if (!data.files || data.files.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-secondary);">data/raw 폴더에 비디오 파일이 없습니다</td></tr>';
+                    document.getElementById('video-files-pagination').textContent = '';
                     return;
                 }
-                tbody.innerHTML = data.videos.map(v => `
-                    <tr>
-                        <td>${v.id}</td>
-                        <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis;">${escapeHtml(v.title || v.video_id)}</td>
-                        <td>${v.duration || '—'}</td>
-                        <td><span class="badge badge-${v.status === 'uploaded' ? 'success' : v.status === 'downloaded' ? 'info' : v.status === 'failed' ? 'danger' : 'secondary'}">${v.status}</span></td>
-                        <td>${v.size_mb ? v.size_mb.toFixed(1) + ' MB' : '—'}</td>
-                        <td><button class="btn-action btn-sm btn-danger" onclick="deleteVideo(${v.id})"><i class="bi bi-trash"></i></button></td>
-                    </tr>
-                `).join('');
-                document.getElementById('videos-pagination').textContent = `총 ${data.total}개의 비디오 중 ${data.videos.length}개 표시`;
+                window._videoFiles = data.files;
+                renderVideoTable(data.files);
+                document.getElementById('video-files-pagination').textContent = `총 ${data.total}개 비디오 (${data.total_size_mb.toFixed(1)} MB)`;
             } catch (error) {
-                console.error('Error loading videos:', error);
+                console.error('Error loading video files:', error);
             }
         }
         
-        async function deleteVideo(id) {
-            if (!confirm('이 비디오를 삭제하시겠습니까?')) return;
-            try {
-                await fetch(`${API_BASE}/api/videos/${id}`, { method: 'DELETE' });
-                loadVideos();
-                addActivity('success', `비디오 ${id} 삭제됨`);
-            } catch (error) {
-                console.error('Error deleting video:', error);
-            }
+        function renderVideoTable(files) {
+            const tbody = document.getElementById('video-files-tbody');
+            tbody.innerHTML = files.map(f => {
+                const statusBadge = f.db_status
+                    ? `<span class="badge badge-${f.db_status === 'downloaded' ? 'info' : f.db_status === 'uploaded' ? 'success' : f.db_status === 'failed' ? 'danger' : 'secondary'}">${f.db_status}</span>`
+                    : '<span class="badge badge-warning">DB 미등록</span>';
+                return `<tr>
+                    <td style="font-family:monospace;font-size:12px;">${escapeHtml(f.filename)}</td>
+                    <td><code>${escapeHtml(f.video_id)}</code></td>
+                    <td>${f.size_mb.toFixed(1)} MB</td>
+                    <td>${f.modified}</td>
+                    <td>${statusBadge}</td>
+                    <td>
+                        <button class="btn-action btn-sm btn-danger" onclick="deleteVideoFile('${escapeHtml(f.filename)}')"><i class="bi bi-trash"></i></button>
+                    </td>
+                </tr>`;
+            }).join('');
         }
         
-        async function cleanupVideos() {
-            if (!confirm('실패한/고아 비디오 파일이 삭제됩니다. 계속하시겠습니까?')) return;
+        function filterVideoTable() {
+            const query = document.getElementById('video-search').value.toLowerCase();
+            if (!window._videoFiles) return;
+            const filtered = window._videoFiles.filter(f => 
+                f.filename.toLowerCase().includes(query) || f.video_id.toLowerCase().includes(query)
+            );
+            renderVideoTable(filtered);
+        }
+        
+        async function deleteVideoFile(filename) {
+            if (!confirm(`${filename} 파일을 삭제하시겠습니까?`)) return;
             try {
-                const res = await fetch(`${API_BASE}/api/cleanup`, { method: 'POST' });
-                const result = await res.json();
-                addActivity('success', `정리 완료: ${result.deleted} 개의 파일이 제거됨`);
-                loadVideos();
-                refreshData();
+                await fetch(`${API_BASE}/api/videos/files/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+                loadVideoFiles();
+                addActivity('success', `비디오 삭제됨: ${filename}`);
             } catch (error) {
-                console.error('Error during cleanup:', error);
+                console.error('Error deleting video file:', error);
             }
         }
         
@@ -1254,6 +1642,70 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 document.getElementById('quality-failed').textContent = data.failed || 0;
                 document.getElementById('quality-avg').textContent = data.avg_score ? data.avg_score.toFixed(2) : '—';
                 document.getElementById('quality-rate').textContent = data.success_rate ? `${data.success_rate.toFixed(1)}%` : '—';
+                
+                // 등급별 분포 차트 (A~D: 통과, F: 실패)
+                const gradeChart = document.getElementById('quality-grade-chart');
+                if (data.grades && Object.keys(data.grades).length > 0) {
+                    const gradeColors = {A:'#22c55e', B:'#34d399', C:'#facc15', D:'#f97316', F:'#dc2626'};
+                    const gradeLabels = {A:'A (90+)', B:'B (80-89)', C:'C (70-79)', D:'D (60-69)', F:'F (실패)'};
+                    const grades = ['A','B','C','D','F'];
+                    const maxG = Math.max(...grades.map(g => data.grades[g] || 0), 1);
+                    gradeChart.innerHTML = grades.map(g => {
+                        const v = data.grades[g] || 0;
+                        const h = Math.max(5, (v / maxG) * 200);
+                        const isPass = g !== 'F';
+                        return `<div style="flex:1;text-align:center;">
+                            <div style="font-size:14px;font-weight:600;color:var(--text-primary);margin-bottom:5px;">${v}</div>
+                            <div style="height:${h}px;background:${gradeColors[g]};border-radius:8px 8px 0 0;transition:height 0.3s;"></div>
+                            <div style="margin-top:8px;font-size:14px;font-weight:700;color:${gradeColors[g]};">${gradeLabels[g]}</div>
+                            <div style="font-size:10px;color:var(--text-secondary);margin-top:2px;">${isPass?'✅ 통과':'❌ 실패'}</div>
+                        </div>`;
+                    }).join('');
+                } else {
+                    gradeChart.innerHTML = '<p style="color:var(--text-secondary);margin:auto;">등급 데이터 없음</p>';
+                }
+                
+                // 품질 메트릭 상세
+                const metricsDiv = document.getElementById('quality-metrics-detail');
+                if (data.metric_averages) {
+                    const m = data.metric_averages;
+                    metricsDiv.innerHTML = `
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+                            <div class="stat-row"><span class="stat-label">🦴 관절 검출 (30점)</span><span class="stat-value">${m.joint_detection?.toFixed(1) || '—'}</span></div>
+                            <div class="stat-row"><span class="stat-label">🏃 동작 자연스러움 (25점)</span><span class="stat-value">${m.motion_naturalness?.toFixed(1) || '—'}</span></div>
+                            <div class="stat-row"><span class="stat-label">✊ 파지 동작 (20점)</span><span class="stat-value">${m.grasp_motion?.toFixed(1) || '—'}</span></div>
+                            <div class="stat-row"><span class="stat-label">📐 안정성 (15점)</span><span class="stat-value">${m.stability?.toFixed(1) || '—'}</span></div>
+                            <div class="stat-row"><span class="stat-label">📏 커버리지 (10점)</span><span class="stat-value">${m.coverage?.toFixed(1) || '—'}</span></div>
+                            <div class="stat-row"><span class="stat-label">🎯 통과 임계값</span><span class="stat-value">${data.threshold || 60}점</span></div>
+                        </div>
+                    `;
+                } else {
+                    metricsDiv.innerHTML = '<p style="color:var(--text-secondary);">메트릭 데이터 없음</p>';
+                }
+                
+                // 에피소드 품질 테이블
+                const qtbody = document.getElementById('quality-episodes-tbody');
+                if (data.episodes && data.episodes.length > 0) {
+                    qtbody.innerHTML = data.episodes.map(ep => {
+                        const gradeColor = {A:'#22c55e',B:'#34d399',C:'#facc15',D:'#f97316',F:'#dc2626'}[ep.grade] || '#888';
+                        const passText = ep.passed ? '✅ 통과' : '❌ 실패';
+                        const passStyle = ep.passed ? 'color:var(--accent-green)' : 'color:var(--accent-red);font-weight:600';
+                        return `<tr style="${!ep.passed ? 'background:rgba(248,81,73,0.05);' : ''}">
+                            <td><code>${escapeHtml(ep.video_id)}</code></td>
+                            <td><strong>${ep.total_score?.toFixed(1)}</strong></td>
+                            <td><span style="color:${gradeColor};font-weight:700;font-size:16px;">${ep.grade}</span></td>
+                            <td>${ep.joint_detection?.toFixed(1) || '—'}</td>
+                            <td>${ep.motion_naturalness?.toFixed(1) || '—'}</td>
+                            <td>${ep.grasp_motion?.toFixed(1) || '—'}</td>
+                            <td>${ep.stability?.toFixed(1) || '—'}</td>
+                            <td>${ep.coverage?.toFixed(1) || '—'}</td>
+                            <td><span style="${passStyle}">${passText}</span></td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    qtbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);">품질 평가 데이터가 없습니다</td></tr>';
+                }
+                
                 const report = document.getElementById('quality-report');
                 if (data.report) {
                     report.innerHTML = `<pre style="color: var(--text-primary); white-space: pre-wrap;">${escapeHtml(JSON.stringify(data.report, null, 2))}</pre>`;
@@ -1456,13 +1908,15 @@ def api_stats():
 
 @app.route("/api/pipeline/status")
 def api_pipeline_status():
-    """파이프라인 상태"""
+    """파이프라인 상태 — 누적 로그 포함"""
     return jsonify({
         "is_running": pipeline_state["is_running"],
         "current_stage": pipeline_state["current_stage"],
         "progress": pipeline_state["progress"],
-        "logs": pipeline_state["logs"][-50:],
+        "logs": pipeline_state["logs"][-100:],
         "started_at": pipeline_state["started_at"],
+        "iteration": pipeline_state.get("iteration", 0),
+        "last_progress": pipeline_state.get("last_progress", {}),
     })
 
 
@@ -1479,23 +1933,27 @@ def api_pipeline_start():
     def run_pipeline():
         pipeline_state["is_running"] = True
         pipeline_state["started_at"] = datetime.now().isoformat()
-        pipeline_state["logs"] = [f"[INFO] Pipeline started - stage: {stage}, target: {target_count}"]
+        # 로그를 초기화하지 않고 누적 (구분선만 추가)
+        pipeline_state["logs"].append(f"\n{'─'*50}")
+        pipeline_state["logs"].append(f"[INFO] ▶ Pipeline started - stage: {stage}, target: {target_count}")
         
         env = os.environ.copy()
         env["PYTHONIOENCODING"] = "utf-8"
         
-        stages = ["crawl", "download", "detect", "upload"] if stage == "all" else [stage]
+        stages = ["crawl", "download", "detect", "build_il", "quality", "upload"] if stage == "all" else [stage]
         
         # 작업 기록 추가
         job_id = len(jobs_history) + 1
         job = {
             "id": job_id,
+            "job_key": f"manual_{job_id}_{datetime.now().strftime('%H%M%S')}",
             "stage": stage,
             "status": "running",
             "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "progress": 0
         }
         jobs_history.insert(0, job)
+        _save_jobs_history()
         
         try:
             for current_stage in stages:
@@ -1545,9 +2003,16 @@ def api_pipeline_start():
             job["status"] = "failed";
         
         finally:
+            # 이전 progress를 last_progress에 보존
+            pipeline_state["last_progress"] = dict(pipeline_state["progress"])
             pipeline_state["is_running"] = False;
             pipeline_state["current_stage"] = None;
             pipeline_state["process"] = None;
+            job["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_jobs_history()
+            # 로그 크기 제한 (2000줄)
+            if len(pipeline_state["logs"]) > 2000:
+                pipeline_state["logs"] = pipeline_state["logs"][-1500:]
     
     thread = threading.Thread(target=run_pipeline, daemon=True);
     thread.start();
@@ -1779,7 +2244,7 @@ def api_pipeline_stats():
 
 @app.route("/api/videos")
 def api_videos():
-    """비디오 목록"""
+    """비디오 목록 (DB 기반)"""
     status_filter = request.args.get("status", "")
     
     conn = get_db_connection()
@@ -1808,7 +2273,6 @@ def api_videos():
                 "size_mb": row["file_size"] / (1024 * 1024) if row["file_size"] else None
             })
         
-        # 전체 개수
         cur = conn.execute("SELECT COUNT(*) FROM videos")
         total = cur.fetchone()[0]
         
@@ -1816,6 +2280,95 @@ def api_videos():
         return jsonify({"videos": videos, "total": total})
     except Exception as e:
         return jsonify({"videos": [], "total": 0, "error": str(e)})
+
+
+@app.route("/api/videos/files")
+def api_video_files():
+    """data/raw 폴더의 실제 비디오 파일 목록"""
+    raw_dir = PROJECT_ROOT / "data" / "raw"
+    sort_by = request.args.get("sort", "name")
+    
+    if not raw_dir.exists():
+        return jsonify({"files": [], "total": 0, "total_size_mb": 0, "avg_size_mb": 0})
+    
+    # DB에서 video_id -> status 매핑
+    db_status_map = {}
+    conn = get_db_connection()
+    if conn:
+        try:
+            cur = conn.execute("SELECT video_id, status FROM videos")
+            for row in cur.fetchall():
+                db_status_map[row["video_id"]] = row["status"]
+            conn.close()
+        except Exception:
+            pass
+    
+    files = []
+    total_size = 0
+    for f in raw_dir.glob("*.mp4"):
+        try:
+            stat = f.stat()
+            size_mb = stat.st_size / (1024 * 1024)
+            total_size += size_mb
+            video_id = f.stem
+            files.append({
+                "filename": f.name,
+                "video_id": video_id,
+                "size_mb": round(size_mb, 2),
+                "size_bytes": stat.st_size,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "modified_ts": stat.st_mtime,
+                "db_status": db_status_map.get(video_id),
+            })
+        except Exception:
+            pass
+    
+    # 정렬
+    if sort_by == "size_desc":
+        files.sort(key=lambda x: x["size_bytes"], reverse=True)
+    elif sort_by == "size_asc":
+        files.sort(key=lambda x: x["size_bytes"])
+    elif sort_by == "date_desc":
+        files.sort(key=lambda x: x["modified_ts"], reverse=True)
+    elif sort_by == "date_asc":
+        files.sort(key=lambda x: x["modified_ts"])
+    else:
+        files.sort(key=lambda x: x["filename"])
+    
+    total = len(files)
+    avg_size = total_size / total if total > 0 else 0
+    
+    return jsonify({
+        "files": files[:200],
+        "total": total,
+        "total_size_mb": round(total_size, 2),
+        "avg_size_mb": round(avg_size, 2),
+    })
+
+
+@app.route("/api/videos/files/<path:filename>", methods=["DELETE"])
+def api_delete_video_file(filename):
+    """비디오 파일 삭제 (파일 + DB 레코드)"""
+    file_path = PROJECT_ROOT / "data" / "raw" / filename
+    if not file_path.exists():
+        return jsonify({"success": False, "message": "File not found"})
+    
+    video_id = Path(filename).stem
+    
+    # 파일 삭제
+    file_path.unlink()
+    
+    # DB에서도 삭제
+    conn = get_db_connection()
+    if conn:
+        try:
+            conn.execute("DELETE FROM videos WHERE video_id = ?", (video_id,))
+            conn.commit()
+            conn.close()
+        except Exception:
+            pass
+    
+    return jsonify({"success": True})
 
 
 @app.route("/api/videos/<int:video_id>", methods=["DELETE"])
@@ -1916,7 +2469,8 @@ def api_cleanup():
 
 @app.route("/api/quality")
 def api_quality():
-    """품질 통계"""
+    """품질 통계 + 등급 분포 + 에피소드별 품질 상세"""
+    import numpy as np
     quality_report_path = PROJECT_ROOT / "data" / "quality_report.json"
     
     result = {
@@ -1924,10 +2478,14 @@ def api_quality():
         "failed": 0,
         "avg_score": 0,
         "success_rate": 0,
-        "report": None
-    };
+        "report": None,
+        "grades": {},
+        "metric_averages": {},
+        "threshold": 60,
+        "episodes": [],
+    }
     
-    conn = get_db_connection();
+    conn = get_db_connection()
     if conn:
         try:
             cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
@@ -1953,6 +2511,98 @@ def api_quality():
         try:
             with open(quality_report_path, "r") as f:
                 result["report"] = json.load(f)
+        except Exception:
+            pass
+
+    # 에피소드 NPZ에서 품질 평가 수행
+    episodes_dir = PROJECT_ROOT / "data" / "episodes"
+    if episodes_dir.exists():
+        try:
+            from quality.evaluator import RobotArmQualityEvaluator, QualityConfig
+            config = QualityConfig(pass_threshold=60.0)
+            evaluator = RobotArmQualityEvaluator(config=config)
+            result["threshold"] = config.pass_threshold
+            
+            grades_count = {"A": 0, "B": 0, "C": 0, "D": 0, "F": 0}
+            metric_sums = {"joint_detection": [], "motion_naturalness": [], "grasp_motion": [], "stability": [], "coverage": []}
+            ep_results = []
+            passed = 0
+            failed = 0
+            
+            npz_files = sorted(episodes_dir.glob("*_episode.npz"))[:200]
+            
+            for npz_path in npz_files:
+                try:
+                    data = np.load(str(npz_path), allow_pickle=True)
+                    sequence = {
+                        "body": data.get("poses", data.get("body_landmarks", np.array([]))),
+                        "left_hand": data.get("left_hand", data.get("left_hand_landmarks", np.array([]))),
+                        "right_hand": data.get("right_hand", data.get("right_hand_landmarks", np.array([]))),
+                    }
+                    for k, v in sequence.items():
+                        if isinstance(v, np.ndarray) and v.size == 0:
+                            sequence[k] = None
+                    
+                    video_id = str(data["video_id"]) if "video_id" in data else npz_path.stem.replace("_episode", "")
+                    qr = evaluator.evaluate(sequence, video_id=video_id)
+                    
+                    # grade는 Enum일 수 있으므로 .value로 변환
+                    grade_val = qr.grade.value if hasattr(qr.grade, 'value') else str(qr.grade) if hasattr(qr, 'grade') else 'F'
+                    total_score = qr.total_score if hasattr(qr, 'total_score') else 0
+                    is_passed = qr.passed if hasattr(qr, 'passed') else False
+                    
+                    grades_count[grade_val] = grades_count.get(grade_val, 0) + 1
+                    if is_passed:
+                        passed += 1
+                    else:
+                        failed += 1
+                    
+                    # EvaluationResult 개별 속성에서 메트릭 추출
+                    ep_metrics = {
+                        "joint_detection": getattr(qr, 'joint_score', None),
+                        "motion_naturalness": getattr(qr, 'motion_score', None),
+                        "grasp_motion": getattr(qr, 'grasping_score', None),
+                        "stability": getattr(qr, 'stability_score', None),
+                        "coverage": getattr(qr, 'coverage_score', None),
+                    }
+                    
+                    for mk in metric_sums:
+                        if ep_metrics.get(mk) is not None:
+                            metric_sums[mk].append(float(ep_metrics[mk]))
+                    
+                    ep_results.append({
+                        "video_id": video_id,
+                        "total_score": total_score,
+                        "grade": grade_val,
+                        "passed": is_passed,
+                        "joint_detection": ep_metrics.get("joint_detection"),
+                        "motion_naturalness": ep_metrics.get("motion_naturalness"),
+                        "grasp_motion": ep_metrics.get("grasp_motion"),
+                        "stability": ep_metrics.get("stability"),
+                        "coverage": ep_metrics.get("coverage"),
+                    })
+                except Exception:
+                    pass
+            
+            # 결과 반영
+            if ep_results:
+                result["grades"] = grades_count
+                result["passed"] = passed
+                result["failed"] = failed
+                total_eval = passed + failed
+                if total_eval > 0:
+                    result["success_rate"] = (passed / total_eval) * 100
+                all_scores = [e["total_score"] for e in ep_results if e["total_score"]]
+                if all_scores:
+                    result["avg_score"] = float(np.mean(all_scores))
+                
+                result["metric_averages"] = {
+                    k: float(np.mean(v)) if v else None
+                    for k, v in metric_sums.items()
+                }
+                result["episodes"] = ep_results[:100]
+        except ImportError:
+            pass
         except Exception:
             pass
 
@@ -2091,7 +2741,7 @@ def api_build_ildata():
     """모방학습 데이터 빌드 실행"""
     try:
         cmd = [
-            sys.executable, str(PROJECT_ROOT / "build_imitation_data.py"),
+            sys.executable, str(PROJECT_ROOT / "scripts" / "pipeline" / "build_imitation_data.py"),
             "--fps", "5", "--max-frames", "100"
         ]
         proc = subprocess.Popen(
@@ -2424,15 +3074,107 @@ def api_health():
     })
 
 
-def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):
+def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = False,
+                      auto_pipeline: bool = False, target_count: int = 500,
+                      pipeline_interval: int = 120):
+    """웹 대시보드 실행
+    
+    Args:
+        auto_pipeline: True면 서버 시작과 동시에 파이프라인 자동 반복 실행
+        target_count: 파이프라인 일일 목표 수
+        pipeline_interval: 파이프라인 반복 간 대기(초)
+    """
 
-    """웹 대시보드 실행"""
+    # 자동 파이프라인 실행
+    if auto_pipeline:
+        def auto_pipeline_loop():
+            """서버 시작 시 자동 파이프라인 반복"""
+            import time as _time
+            _time.sleep(3)  # Flask 서버 시작 대기
+            
+            iteration = 0
+            while True:
+                try:
+                    iteration += 1
+                    pipeline_state["is_running"] = True
+                    pipeline_state["started_at"] = datetime.now().isoformat()
+                    pipeline_state["current_stage"] = "crawl"
+                    pipeline_state["logs"].append(
+                        f"[INFO] 🔄 자동 파이프라인 #{iteration} 시작 (목표: {target_count})"
+                    )
+
+                    env = os.environ.copy()
+                    env["PYTHONIOENCODING"] = "utf-8"
+
+                    all_stages = ["crawl", "download", "detect", "build_il", "quality", "upload"]
+
+                    for current_stage in all_stages:
+                        if not pipeline_state["is_running"]:
+                            break
+
+                        pipeline_state["current_stage"] = current_stage
+                        pipeline_state["logs"].append(f"[INFO] ▶ {current_stage} 단계 시작...")
+
+                        cmd = [
+                            sys.executable, str(PROJECT_ROOT / "mass_collector.py"),
+                            "--target", str(target_count),
+                            "--stage", current_stage,
+                        ]
+
+                        proc = subprocess.Popen(
+                            cmd, cwd=str(PROJECT_ROOT),
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", env=env,
+                        )
+                        pipeline_state["process"] = proc
+
+                        for line in proc.stdout:
+                            line = line.strip()
+                            if line:
+                                pipeline_state["logs"].append(line)
+                                # 로그 크기 제한
+                                if len(pipeline_state["logs"]) > 500:
+                                    pipeline_state["logs"] = pipeline_state["logs"][-300:]
+                            if not pipeline_state["is_running"]:
+                                proc.terminate()
+                                break
+
+                        proc.wait()
+                        pipeline_state["progress"][current_stage] = 100
+
+                    pipeline_state["is_running"] = False
+                    pipeline_state["current_stage"] = None
+                    pipeline_state["process"] = None
+                    pipeline_state["logs"].append(
+                        f"[SUCCESS] ✅ 자동 파이프라인 #{iteration} 완료"
+                    )
+
+                    # 다음 반복까지 대기
+                    pipeline_state["logs"].append(
+                        f"[INFO] ⏳ {pipeline_interval}초 대기 후 다음 반복..."
+                    )
+                    _time.sleep(pipeline_interval)
+
+                    # 진행률 리셋
+                    for k in pipeline_state["progress"]:
+                        pipeline_state["progress"][k] = 0
+
+                except Exception as e:
+                    pipeline_state["is_running"] = False
+                    pipeline_state["logs"].append(f"[ERROR] 파이프라인 에러: {e}")
+                    _time.sleep(300)  # 에러 시 5분 대기
+
+        auto_thread = threading.Thread(target=auto_pipeline_loop, daemon=True)
+        auto_thread.start()
+        print("🔄 자동 파이프라인 모드 활성화됨")
+
     print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
 ║                     P-ADE Web Dashboard                         ║
 ╠══════════════════════════════════════════════════════════════════╣
 ║  URL: http://localhost:{port}                                    ║
 ║  API: http://localhost:{port}/api/stats                          ║
+║  Auto Pipeline: {'ON' if auto_pipeline else 'OFF':>4}                                       ║
 ╚══════════════════════════════════════════════════════════════════╝
 """)
     app.run(host=host, port=port, debug=debug, threaded=True)
@@ -2444,6 +3186,16 @@ if __name__ == "__main__":
     parser.add_argument("--host", default="0.0.0.0", help="Host to bind")
     parser.add_argument("--port", type=int, default=5000, help="Port to bind")
     parser.add_argument("--debug", action="store_true", help="Debug mode")
+    parser.add_argument("--auto-pipeline", action="store_true",
+                        help="서버 시작 시 파이프라인 자동 실행")
+    parser.add_argument("--target", type=int, default=500, help="파이프라인 목표 수")
+    parser.add_argument("--interval", type=int, default=120,
+                        help="파이프라인 반복 간격(초)")
     args = parser.parse_args()
     
-    run_web_dashboard(host=args.host, port=args.port, debug=args.debug)
+    run_web_dashboard(
+        host=args.host, port=args.port, debug=args.debug,
+        auto_pipeline=args.auto_pipeline,
+        target_count=args.target,
+        pipeline_interval=args.interval,
+    )

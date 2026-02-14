@@ -103,6 +103,10 @@ class VideoDownloader:
         if progress_callback:
             opts['progress_hooks'] = [progress_callback]
         
+        # yt-dlp 인증 쿠키 적용
+        if Path("cookies.txt").exists():
+            opts['cookies'] = str(Path("cookies.txt"))
+
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 logger.info(f"Downloading video: {url}")

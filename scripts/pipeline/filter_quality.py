@@ -27,7 +27,7 @@ import shutil
 import numpy as np
 
 # 프로젝트 루트 추가
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from core.logging_config import setup_logger
@@ -373,6 +373,7 @@ def main():
     
     parser.add_argument("--update-db", action="store_true", help="DB 업데이트")
     parser.add_argument("--dry-run", action="store_true", help="파일 복사 없이 분석만")
+    parser.add_argument("--no-gpu-streams", action="store_true", help="GPU 3-Stream 비활성화")
     
     args = parser.parse_args()
     
@@ -412,8 +413,53 @@ def main():
                 print(f"     - {reason}")
     
     elif args.all or args.analyze:
-        # 모든 파일 분석
-        results = qf.analyze_all()
+        # GPU 3-Stream 병렬 처리 시도
+        gpu_used = False
+        if not args.no_gpu_streams and not args.analyze:
+            try:
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                print(f"\n🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+                
+                pose_files = list(Path(args.poses_dir).glob("*_pose.npz"))
+                if pose_files:
+                    processor = stream_mgr.make_quality_filter_processor(
+                        filtered_dir=None if args.dry_run else args.output_dir,
+                        threshold=thresholds.min_confidence,
+                    )
+                    gpu_results = stream_mgr.process_batch(
+                        [str(f) for f in pose_files], processor
+                    )
+                    
+                    for r in gpu_results:
+                        if r and r.get("success"):
+                            passed_str = "✅ PASS" if r.get("passed") else "❌ FAIL"
+                            print(f"  {passed_str} {r.get('video_id', '?')}: "
+                                  f"score={r.get('quality_score', 0):.2f}, conf={r.get('confidence_mean', 0):.2f}")
+                            results.append(FilterResult(
+                                file_path=r.get("file_path", ""),
+                                video_id=r.get("video_id", ""),
+                                passed=r.get("passed", False),
+                                quality_score=r.get("quality_score", 0.0),
+                                confidence_mean=r.get("confidence_mean", 0.0),
+                                jitter_score=r.get("jitter_score", 0.0),
+                                nan_ratio=0.0,
+                                total_frames=0,
+                                failure_reasons=[],
+                            ))
+                        else:
+                            print(f"  ❌ {r.get('video_id', '?')}: {r.get('error', 'unknown')}")
+                    
+                    stream_mgr.print_stats()
+                    gpu_used = True
+            except Exception as e:
+                print(f"⚠️ GPU 3-Stream 실패, 순차 모드로 폴백: {e}")
+        
+        # 폴백: 순차 처리
+        if not gpu_used:
+            results = qf.analyze_all()
         
         if args.top_percent:
             # 상위 N% 선택

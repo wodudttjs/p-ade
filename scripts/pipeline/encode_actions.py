@@ -26,7 +26,7 @@ import shutil
 import numpy as np
 
 # 프로젝트 루트 추가
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from core.logging_config import setup_logger
@@ -378,6 +378,8 @@ def main():
                         help="End-effector만 사용 (기본값)")
     parser.add_argument("--all-joints", action="store_true",
                         help="전체 관절 사용")
+    parser.add_argument("--no-gpu-streams", action="store_true",
+                        help="GPU 3-Stream 비활성화")
     
     args = parser.parse_args()
     
@@ -409,7 +411,60 @@ def main():
             print(f"\n❌ 인코딩 실패: {result.error}")
     
     elif args.all:
-        results = encoder.encode_all()
+        # GPU 3-Stream 병렬 처리 시도
+        gpu_used = False
+        if not args.no_gpu_streams:
+            try:
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                print(f"\n🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+                
+                pose_files = list(Path(args.poses_dir).glob("*_pose.npz"))
+                if pose_files:
+                    processor = stream_mgr.make_encode_processor(
+                        poses_dir=args.poses_dir,
+                        output_dir=args.output_dir,
+                    )
+                    gpu_results = stream_mgr.process_batch(
+                        [str(f) for f in pose_files], processor
+                    )
+                    
+                    for r in gpu_results:
+                        if r and r.get("success"):
+                            if r.get("status") == "skipped":
+                                print(f"  ⏭️  {r.get('video_id', '?')}: {r.get('msg', 'skipped')}")
+                            else:
+                                print(f"  ✅ {r.get('video_id', '?')}: "
+                                      f"{r.get('frames', 0)}f S:{r.get('state_dim', '?')} A:{r.get('action_dim', '?')}")
+                            results.append(EncodingResult(
+                                file_path=r.get("file_path", ""),
+                                video_id=r.get("video_id", ""),
+                                success=True,
+                                num_frames=r.get("frames", 0),
+                                state_dim=r.get("state_dim", 0),
+                                action_dim=r.get("action_dim", 0),
+                            ))
+                        else:
+                            print(f"  ❌ {r.get('video_id', '?')}: {r.get('error', 'unknown')}")
+                            results.append(EncodingResult(
+                                file_path=r.get("file_path", ""),
+                                video_id=r.get("video_id", ""),
+                                success=False,
+                                error=r.get("error", "unknown"),
+                            ))
+                    
+                    stream_mgr.print_stats()
+                    gpu_used = True
+                else:
+                    print(f"⚠️ 포즈 파일 없음: {args.poses_dir}")
+            except Exception as e:
+                print(f"⚠️ GPU 3-Stream 실패, 순차 모드로 폴백: {e}")
+        
+        # 폴백: 순차 처리
+        if not gpu_used:
+            results = encoder.encode_all()
         encoder.print_summary(results)
     
     else:

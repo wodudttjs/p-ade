@@ -1,7 +1,17 @@
 """
 로봇팔 영상 품질 평가 시스템
 
-4-DOF 관절 검출, 파지 동작 감지 등을 통해 데이터 품질을 평가합니다.
+npz 에피소드 파일 기반 데이터 품질을 평가합니다.
+
+npz 구조:
+  - poses: (N, 33, 3) — MediaPipe body 포즈 (정규화 좌표 x,y,z)
+  - left_hand: (N, 21, 3) — 왼손 랜드마크
+  - right_hand: (N, 21, 3) — 오른손 랜드마크
+  - confidence: (N,) — 프레임별 신뢰도 (별도 배열)
+  - states: (N, D_s) — 상태 벡터
+  - actions: (N-1, D_a) — 행동 벡터
+  - gripper_state: (N,) — 그리퍼 상태
+  - velocity: (N, 33, 3) — 속도
 """
 
 import sys
@@ -37,14 +47,14 @@ class EvaluationResult:
     total_score: float = 0.0
     grade: Grade = Grade.F
     passed: bool = False
-    
+
     # 상세 점수
     joint_score: float = 0.0       # 관절 검출 (30점)
     motion_score: float = 0.0      # 동작 품질 (25점)
     grasping_score: float = 0.0    # 파지 동작 (20점)
     stability_score: float = 0.0   # 안정성 (15점)
     coverage_score: float = 0.0    # 프레임 커버리지 (10점)
-    
+
     # 상세 정보
     detected_joints: Dict[str, bool] = field(default_factory=dict)
     has_grasping: bool = False
@@ -55,17 +65,24 @@ class EvaluationResult:
 @dataclass
 class QualityConfig:
     """평가 설정"""
-    min_joint_confidence: float = 0.5  # 관절 검출 최소 신뢰도
-    min_motion_threshold: float = 0.05  # 최소 동작 크기
-    grasping_threshold: float = 0.15    # 파지 감지 임계값
-    min_frame_coverage: float = 0.7     # 최소 프레임 커버리지
+    min_joint_confidence: float = 0.3   # 관절 검출 최소 신뢰도 (별도 confidence 배열 기준)
+    min_motion_threshold: float = 0.02  # 최소 동작 크기 (정규화 좌표 기준)
+    grasping_threshold: float = 0.02    # 파지 감지 임계값 (정규화 좌표 엄지-검지 거리 변화)
+    min_frame_coverage: float = 0.5     # 최소 프레임 커버리지
     pass_threshold: float = 60.0        # 통과 점수
 
 
 class RobotArmQualityEvaluator:
     """
-    로봇팔 영상 품질 평가자
-    
+    로봇팔 영상 품질 평가자 — npz 에피소드 파일 기반
+
+    npz 데이터 구조:
+      - poses: numpy (N, 33, 3) — body landmarks (x, y, z 정규화 좌표)
+      - left_hand / right_hand: numpy (N, 21, 3) — hand landmarks
+      - confidence: numpy (N,) — 프레임별 포즈 검출 신뢰도
+      - gripper_state: numpy (N,) — 그리퍼 열림/닫힘 상태
+      - states / actions: numpy — 모방학습용 상태/행동 벡터
+
     평가 기준:
       - 4-DOF 관절 검출 (어깨, 팔꿈치, 손목, 그리퍼): 30점
       - 동작 품질 (움직임 크기, 연속성): 25점
@@ -73,16 +90,16 @@ class RobotArmQualityEvaluator:
       - 안정성 (떨림, 오검출): 15점
       - 프레임 커버리지: 10점
     """
-    
-    # MediaPipe 랜드마크 인덱스
+
+    # MediaPipe body 랜드마크 인덱스 (33개 중)
     JOINT_INDICES = {
         "shoulder": [11, 12],   # 양쪽 어깨
         "elbow": [13, 14],      # 양쪽 팔꿈치
         "wrist": [15, 16],      # 양쪽 손목
-        "gripper": [19, 20],    # 양쪽 손끝 (검지)
+        "gripper": [19, 20],    # 양쪽 검지 끝
     }
-    
-    # 손가락 인덱스 (MediaPipe Hand)
+
+    # 손가락 인덱스 (MediaPipe Hand, 21개 중)
     HAND_INDICES = {
         "thumb_tip": 4,
         "index_tip": 8,
@@ -90,10 +107,76 @@ class RobotArmQualityEvaluator:
         "ring_tip": 16,
         "pinky_tip": 20,
     }
-    
+
     def __init__(self, config: Optional[QualityConfig] = None):
         self.config = config or QualityConfig()
-    
+
+    # ------------------------------------------------------------------
+    # npz 파일에서 직접 평가하는 편의 메서드
+    # ------------------------------------------------------------------
+    def evaluate_npz(self, npz_path: str, video_id: str = "") -> EvaluationResult:
+        """
+        npz 파일을 직접 로드하여 평가
+
+        Args:
+            npz_path: .npz 파일 경로
+            video_id: 비디오 ID (없으면 파일명에서 추출)
+        """
+        data = np.load(str(npz_path), allow_pickle=True)
+
+        if not video_id:
+            video_id = Path(npz_path).stem.replace("_episode", "")
+
+        # npz → sequence dict 변환
+        sequence = self._npz_to_sequence(data)
+        return self.evaluate(sequence, video_id=video_id)
+
+    def _npz_to_sequence(self, data) -> Dict[str, Any]:
+        """npz NpzFile → evaluator 가 기대하는 sequence dict 변환"""
+        seq: Dict[str, Any] = {}
+
+        # body poses: (N, 33, 3)
+        poses = data.get("poses", data.get("body_landmarks", None))
+        if poses is not None and isinstance(poses, np.ndarray) and poses.ndim == 3:
+            seq["body"] = poses          # (N, 33, 3) numpy 배열 그대로
+        else:
+            seq["body"] = None
+
+        # hands: (N, 21, 3)
+        for key in ("left_hand", "right_hand"):
+            arr = data.get(key, data.get(f"{key}_landmarks", None))
+            if arr is not None and isinstance(arr, np.ndarray) and arr.ndim == 3:
+                seq[key] = arr
+            else:
+                seq[key] = None
+
+        # confidence: (N,) — 별도 배열
+        conf = data.get("confidence", None)
+        if conf is not None and isinstance(conf, np.ndarray) and conf.ndim == 1:
+            seq["confidence"] = conf
+        else:
+            seq["confidence"] = None
+
+        # gripper_state: (N,)
+        grip = data.get("gripper_state", None)
+        if grip is not None and isinstance(grip, np.ndarray):
+            seq["gripper_state"] = grip
+        else:
+            seq["gripper_state"] = None
+
+        # states / actions (IL 데이터 존재 여부 체크용)
+        for key in ("states", "actions", "velocity"):
+            arr = data.get(key, None)
+            if arr is not None and isinstance(arr, np.ndarray) and arr.size > 0:
+                seq[key] = arr
+            else:
+                seq[key] = None
+
+        return seq
+
+    # ------------------------------------------------------------------
+    # 메인 평가
+    # ------------------------------------------------------------------
     def evaluate(
         self,
         sequence: Dict[str, Any],
@@ -101,256 +184,323 @@ class RobotArmQualityEvaluator:
     ) -> EvaluationResult:
         """
         시퀀스 품질 평가
-        
+
         Args:
-            sequence: 포즈 시퀀스 데이터 (body, left_hand, right_hand)
+            sequence: {
+                "body": np.ndarray (N, 33, 3) 또는 None,
+                "left_hand": np.ndarray (N, 21, 3) 또는 None,
+                "right_hand": np.ndarray (N, 21, 3) 또는 None,
+                "confidence": np.ndarray (N,) 또는 None,
+                "gripper_state": np.ndarray (N,) 또는 None,
+                "states": np.ndarray 또는 None,
+                "actions": np.ndarray 또는 None,
+            }
             video_id: 비디오 ID
-            
-        Returns:
-            EvaluationResult
         """
         result = EvaluationResult(video_id=video_id)
-        
-        # 데이터 검증
-        if not sequence or "body" not in sequence:
+
+        body = sequence.get("body")
+        if body is None or (isinstance(body, np.ndarray) and body.size == 0):
             result.issues.append("포즈 데이터 없음")
             return result
-        
-        body_frames = sequence.get("body", [])
-        left_hand = sequence.get("left_hand", [])
-        right_hand = sequence.get("right_hand", [])
-        
-        if len(body_frames) < 10:
-            result.issues.append("프레임 수 부족 (<10)")
+
+        # numpy 배열로 통일
+        if not isinstance(body, np.ndarray):
+            body = np.array(body)
+
+        n_frames = body.shape[0] if body.ndim >= 1 else 0
+        if n_frames < 10:
+            result.issues.append(f"프레임 수 부족 ({n_frames} < 10)")
             return result
-        
+
+        left_hand = sequence.get("left_hand")
+        right_hand = sequence.get("right_hand")
+        confidence = sequence.get("confidence")  # (N,) 별도 배열
+        gripper_state = sequence.get("gripper_state")
+
         # 1. 관절 검출 점수 (30점)
-        result.joint_score, result.detected_joints = self._evaluate_joints(body_frames)
-        
+        result.joint_score, result.detected_joints = self._evaluate_joints(body, confidence)
+
         # 2. 동작 품질 점수 (25점)
-        result.motion_score = self._evaluate_motion(body_frames)
-        
+        result.motion_score = self._evaluate_motion(body)
+
         # 3. 파지 동작 점수 (20점)
         result.grasping_score, result.has_grasping = self._evaluate_grasping(
-            left_hand, right_hand
+            left_hand, right_hand, gripper_state
         )
-        
+
         # 4. 안정성 점수 (15점)
-        result.stability_score = self._evaluate_stability(body_frames)
-        
+        result.stability_score = self._evaluate_stability(body)
+
         # 5. 커버리지 점수 (10점)
-        result.coverage_score, result.frame_coverage = self._evaluate_coverage(body_frames)
-        
+        result.coverage_score, result.frame_coverage = self._evaluate_coverage(
+            body, confidence
+        )
+
         # 총점 계산
         result.total_score = (
-            result.joint_score +
-            result.motion_score +
-            result.grasping_score +
-            result.stability_score +
-            result.coverage_score
+            result.joint_score
+            + result.motion_score
+            + result.grasping_score
+            + result.stability_score
+            + result.coverage_score
         )
-        
+
         # 등급 결정
         result.grade = self._determine_grade(result.total_score)
         result.passed = result.total_score >= self.config.pass_threshold
-        
+
         return result
-    
-    def _evaluate_joints(self, body_frames: List[np.ndarray]) -> Tuple[float, Dict[str, bool]]:
-        """4-DOF 관절 검출 평가 (30점 만점)"""
-        detected = {joint: False for joint in self.JOINT_INDICES}
-        joint_confidences = {joint: [] for joint in self.JOINT_INDICES}
-        
-        for frame in body_frames:
-            if frame is None or len(frame) < 21:
+
+    # ------------------------------------------------------------------
+    # 1. 관절 검출 (30점)
+    # ------------------------------------------------------------------
+    def _evaluate_joints(
+        self,
+        body: np.ndarray,
+        confidence: Optional[np.ndarray],
+    ) -> Tuple[float, Dict[str, bool]]:
+        """
+        4-DOF 관절 검출 평가 (30점 만점)
+
+        body: (N, 33, 3)
+        confidence: (N,) — 프레임별 전체 신뢰도
+        """
+        detected: Dict[str, bool] = {joint: False for joint in self.JOINT_INDICES}
+
+        n_frames = body.shape[0]
+        points_per_joint = 30.0 / len(self.JOINT_INDICES)  # 7.5
+
+        score = 0.0
+
+        for joint_name, indices in self.JOINT_INDICES.items():
+            # 해당 관절 좌표가 0이 아닌(= 검출된) 프레임 비율
+            detect_count = 0
+            for idx in indices:
+                if idx < body.shape[1]:
+                    coords = body[:, idx, :]          # (N, 3)
+                    nonzero = np.any(coords != 0, axis=1)  # 좌표가 (0,0,0)이 아닌 프레임
+                    detect_count = max(detect_count, int(np.sum(nonzero)))
+
+            detect_ratio = detect_count / n_frames if n_frames > 0 else 0
+
+            # confidence 배열이 있으면 가중 평균
+            if confidence is not None and confidence.size == n_frames:
+                avg_conf = float(np.mean(confidence))
+                effective = detect_ratio * min(1.0, avg_conf / self.config.min_joint_confidence)
+            else:
+                effective = detect_ratio
+
+            if effective >= 0.5:
+                detected[joint_name] = True
+                score += points_per_joint
+            elif effective > 0:
+                score += points_per_joint * effective
+            # else: 0
+
+        return min(30.0, score), detected
+
+    # ------------------------------------------------------------------
+    # 2. 동작 품질 (25점)
+    # ------------------------------------------------------------------
+    def _evaluate_motion(self, body: np.ndarray) -> float:
+        """
+        동작 품질 평가 (25점 만점)
+
+        body: (N, 33, 3)
+        """
+        if body.shape[0] < 2:
+            return 0.0
+
+        # 손목(15,16) 좌표 추출 — 둘 중 움직임이 큰 쪽 사용
+        best_score = 0.0
+
+        for idx in [16, 15]:  # 오른손목, 왼손목
+            if idx >= body.shape[1]:
                 continue
-            
-            for joint_name, indices in self.JOINT_INDICES.items():
-                # 양쪽 중 높은 confidence 사용
-                confidences = []
-                for idx in indices:
-                    if idx < len(frame) and len(frame[idx]) >= 4:
-                        # [x, y, z, visibility]
-                        conf = frame[idx][3] if len(frame[idx]) > 3 else frame[idx][2]
-                        confidences.append(conf)
-                
-                if confidences:
-                    joint_confidences[joint_name].append(max(confidences))
-        
-        # 관절별 검출 여부 판정
-        score = 0
-        points_per_joint = 30 / 4  # 관절당 7.5점
-        
-        for joint_name, confs in joint_confidences.items():
-            if confs:
-                avg_conf = np.mean(confs)
-                if avg_conf >= self.config.min_joint_confidence:
-                    detected[joint_name] = True
-                    score += points_per_joint
-                else:
-                    # 부분 점수
-                    score += points_per_joint * (avg_conf / self.config.min_joint_confidence) * 0.5
-        
-        return min(30, score), detected
-    
-    def _evaluate_motion(self, body_frames: List[np.ndarray]) -> float:
-        """동작 품질 평가 (25점 만점)"""
-        if len(body_frames) < 2:
-            return 0
-        
-        # 손목 위치 추적 (메인 동작 지표)
-        wrist_positions = []
-        
-        for frame in body_frames:
-            if frame is None or len(frame) < 17:
+            wrist = body[:, idx, :]  # (N, 3)
+
+            # 전부 0이면 스킵
+            if np.all(wrist == 0):
                 continue
-            
-            # 오른쪽 손목 (16) 또는 왼쪽 손목 (15)
-            for idx in [16, 15]:
-                if idx < len(frame) and frame[idx] is not None:
-                    wrist_positions.append(frame[idx][:3])
-                    break
-        
-        if len(wrist_positions) < 2:
-            return 0
-        
-        wrist_positions = np.array(wrist_positions)
-        
-        # 전체 이동 거리
-        total_distance = np.sum(np.linalg.norm(np.diff(wrist_positions, axis=0), axis=1))
-        
-        # 이동 범위
-        range_x = np.max(wrist_positions[:, 0]) - np.min(wrist_positions[:, 0])
-        range_y = np.max(wrist_positions[:, 1]) - np.min(wrist_positions[:, 1])
-        range_z = np.max(wrist_positions[:, 2]) - np.min(wrist_positions[:, 2]) if wrist_positions.shape[1] > 2 else 0
-        
-        motion_range = np.sqrt(range_x**2 + range_y**2 + range_z**2)
-        
-        # 점수 계산
-        score = 0
-        
-        # 충분한 동작이 있는지 (15점)
-        if motion_range > self.config.min_motion_threshold:
-            score += min(15, motion_range * 100)
-        
-        # 동작 연속성 (10점) - 급격한 점프 없음
-        velocity = np.linalg.norm(np.diff(wrist_positions, axis=0), axis=1)
-        velocity_std = np.std(velocity)
-        velocity_mean = np.mean(velocity)
-        
-        if velocity_mean > 0:
-            smoothness = 1 - min(1, velocity_std / velocity_mean)
-            score += smoothness * 10
-        
-        return min(25, score)
-    
+
+            # 이동 범위
+            ranges = np.max(wrist, axis=0) - np.min(wrist, axis=0)  # (3,)
+            motion_range = float(np.linalg.norm(ranges))
+
+            # 프레임 간 속도
+            diffs = np.diff(wrist, axis=0)  # (N-1, 3)
+            velocity = np.linalg.norm(diffs, axis=1)  # (N-1,)
+            vel_mean = float(np.mean(velocity))
+            vel_std = float(np.std(velocity))
+
+            s = 0.0
+            # 충분한 동작 (15점)
+            if motion_range > self.config.min_motion_threshold:
+                # 정규화 좌표 기준 range ~ 0.02 ~ 1.0 범위
+                s += min(15.0, motion_range * 30.0)
+
+            # 동작 연속성 (10점) — 급격한 점프 없이 부드러운 동작
+            if vel_mean > 0:
+                smoothness = 1.0 - min(1.0, vel_std / vel_mean)
+                s += smoothness * 10.0
+
+            best_score = max(best_score, s)
+
+        return min(25.0, best_score)
+
+    # ------------------------------------------------------------------
+    # 3. 파지 동작 (20점)
+    # ------------------------------------------------------------------
     def _evaluate_grasping(
         self,
-        left_hand: List[np.ndarray],
-        right_hand: List[np.ndarray],
+        left_hand: Optional[np.ndarray],
+        right_hand: Optional[np.ndarray],
+        gripper_state: Optional[np.ndarray] = None,
     ) -> Tuple[float, bool]:
-        """파지 동작 평가 (20점 만점)"""
-        hand_frames = right_hand if right_hand else left_hand
-        
-        if not hand_frames or len(hand_frames) < 5:
-            return 0, False
-        
-        # 엄지-검지 거리 변화 추적
-        finger_distances = []
-        
-        for frame in hand_frames:
-            if frame is None or len(frame) < 21:
-                continue
-            
-            thumb = frame[4] if len(frame) > 4 else None
-            index = frame[8] if len(frame) > 8 else None
-            
-            if thumb is not None and index is not None:
-                dist = np.sqrt(
-                    (thumb[0] - index[0])**2 +
-                    (thumb[1] - index[1])**2
-                )
-                finger_distances.append(dist)
-        
-        if len(finger_distances) < 2:
-            return 0, False
-        
-        # 거리 변화량
-        distance_variation = max(finger_distances) - min(finger_distances)
+        """
+        파지 동작 평가 (20점 만점)
+
+        left_hand / right_hand: (N, 21, 3) 또는 None
+        gripper_state: (N,) — 0=열림, 1=닫힘 또는 연속값
+        """
+        score = 0.0
+        has_grasping = False
+
+        # ── (A) gripper_state 배열 기반 평가 (있으면 우선) ──
+        if gripper_state is not None and isinstance(gripper_state, np.ndarray) and gripper_state.size >= 5:
+            gs = gripper_state.astype(float)
+            variation = float(np.max(gs) - np.min(gs))
+
+            if variation > 0.01:
+                has_grasping = True
+                score += 12.0
+
+                # 상태 변화 횟수 (열림↔닫힘 사이클)
+                binary = gs > np.mean(gs)
+                changes = int(np.sum(np.diff(binary.astype(int)) != 0))
+                if changes >= 2:
+                    score += min(8.0, changes * 2.0)
+                else:
+                    score += 3.0
+
+                return min(20.0, score), has_grasping
+
+        # ── (B) 손 랜드마크 기반 평가 (엄지-검지 거리) ──
+        hand = right_hand if (right_hand is not None and isinstance(right_hand, np.ndarray) and right_hand.size > 0) \
+            else left_hand
+
+        if hand is None or not isinstance(hand, np.ndarray) or hand.ndim != 3 or hand.shape[0] < 5:
+            return 0.0, False
+
+        # 엄지(4) - 검지(8) 거리
+        thumb = hand[:, 4, :]   # (N, 3)
+        index = hand[:, 8, :]   # (N, 3)
+        dists = np.linalg.norm(thumb - index, axis=1)  # (N,)
+
+        # 전부 0이면 검출 안 된 것
+        if np.all(dists == 0):
+            return 0.0, False
+
+        distance_variation = float(np.max(dists) - np.min(dists))
         has_grasping = distance_variation > self.config.grasping_threshold
-        
-        score = 0
-        
+
         if has_grasping:
-            # 파지 동작 감지됨 (15점)
-            score = 15
-            
-            # 파지-해제 사이클 (추가 5점)
-            distances = np.array(finger_distances)
-            threshold = np.mean(distances)
-            
-            # 상태 변화 횟수
-            states = distances > threshold
-            changes = np.sum(np.diff(states.astype(int)) != 0)
-            
-            if changes >= 2:  # 최소 1회 사이클
-                score += min(5, changes * 1.5)
+            score = 12.0
+            # 사이클 분석
+            threshold_val = np.mean(dists)
+            states = dists > threshold_val
+            changes = int(np.sum(np.diff(states.astype(int)) != 0))
+            if changes >= 2:
+                score += min(8.0, changes * 2.0)
+            else:
+                score += 3.0
         else:
-            # 손 움직임만 있는 경우 (부분 점수)
-            score = min(8, distance_variation * 50)
-        
-        return min(20, score), has_grasping
-    
-    def _evaluate_stability(self, body_frames: List[np.ndarray]) -> float:
-        """안정성 평가 (15점 만점)"""
-        if len(body_frames) < 5:
-            return 0
-        
-        # 어깨 위치 (고정점)로 안정성 측정
-        shoulder_positions = []
-        
-        for frame in body_frames:
-            if frame is None or len(frame) < 13:
-                continue
-            
-            # 양쪽 어깨 중점
-            left = frame[11][:2] if len(frame) > 11 else None
-            right = frame[12][:2] if len(frame) > 12 else None
-            
-            if left is not None and right is not None:
-                center = (np.array(left) + np.array(right)) / 2
-                shoulder_positions.append(center)
-        
-        if len(shoulder_positions) < 5:
-            return 7.5  # 데이터 부족 시 중간 점수
-        
-        positions = np.array(shoulder_positions)
-        
-        # 표준편차 계산 (낮을수록 안정)
-        std_x = np.std(positions[:, 0])
-        std_y = np.std(positions[:, 1])
-        total_std = np.sqrt(std_x**2 + std_y**2)
-        
-        # 안정성 점수 (std < 0.01 이면 만점)
-        stability = max(0, 1 - total_std / 0.05)
-        
-        return stability * 15
-    
-    def _evaluate_coverage(self, body_frames: List[np.ndarray]) -> Tuple[float, float]:
-        """프레임 커버리지 평가 (10점 만점)"""
-        valid_frames = sum(1 for f in body_frames if f is not None and len(f) > 0)
-        total_frames = len(body_frames)
-        
-        coverage = valid_frames / total_frames if total_frames > 0 else 0
-        
-        # 커버리지 70% 이상이면 만점
+            # 부분 점수: 손 움직임은 있음
+            hand_movement = float(np.mean(np.linalg.norm(np.diff(hand[:, 8, :], axis=0), axis=1)))
+            if hand_movement > 0.001:
+                score = min(8.0, hand_movement * 200.0)
+
+        return min(20.0, score), has_grasping
+
+    # ------------------------------------------------------------------
+    # 4. 안정성 (15점)
+    # ------------------------------------------------------------------
+    def _evaluate_stability(self, body: np.ndarray) -> float:
+        """
+        안정성 평가 (15점 만점)
+
+        body: (N, 33, 3) — 어깨(11,12) 위치 변동으로 판단
+        좌표가 정규화(0~1)가 아닌 월드 좌표일 수 있으므로
+        전체 좌표 범위 대비 상대적 안정성을 평가합니다.
+        """
+        if body.shape[0] < 5:
+            return 0.0
+
+        # 양쪽 어깨 중점
+        left_sh = body[:, 11, :2]   # (N, 2) — x,y
+        right_sh = body[:, 12, :2]
+        center = (left_sh + right_sh) / 2.0  # (N, 2)
+
+        # 전부 0이면 검출 안 됨 → 중간 점수
+        if np.all(center == 0):
+            return 7.5
+
+        # 전체 body 좌표의 범위로 정규화 (좌표 스케일에 독립적)
+        body_2d = body[:, :, :2].reshape(-1, 2)
+        nonzero_mask = np.any(body_2d != 0, axis=1)
+        if nonzero_mask.sum() < 10:
+            return 7.5
+
+        body_range = np.max(body_2d[nonzero_mask], axis=0) - np.min(body_2d[nonzero_mask], axis=0)
+        scale = float(np.linalg.norm(body_range))
+
+        if scale < 1e-6:
+            return 7.5
+
+        # 어깨 중점 std를 전체 범위 대비 비율로
+        std_xy = np.std(center, axis=0)
+        relative_std = float(np.linalg.norm(std_xy)) / scale
+
+        # relative_std < 0.05 이면 만점 (어깨가 전체 범위의 5% 미만 흔들림)
+        # relative_std > 0.3 이면 0점
+        stability = max(0.0, 1.0 - relative_std / 0.3)
+
+        return stability * 15.0
+
+    # ------------------------------------------------------------------
+    # 5. 커버리지 (10점)
+    # ------------------------------------------------------------------
+    def _evaluate_coverage(
+        self,
+        body: np.ndarray,
+        confidence: Optional[np.ndarray],
+    ) -> Tuple[float, float]:
+        """
+        프레임 커버리지 평가 (10점 만점)
+
+        body: (N, 33, 3)
+        confidence: (N,) 또는 None
+        """
+        n_frames = body.shape[0]
+
+        if confidence is not None and confidence.size == n_frames:
+            # confidence > 0 인 프레임 비율
+            valid = int(np.sum(confidence > 0.01))
+        else:
+            # 좌표가 전부 0이 아닌 프레임
+            valid = int(np.sum(np.any(body.reshape(n_frames, -1) != 0, axis=1)))
+
+        coverage = valid / n_frames if n_frames > 0 else 0.0
+
         if coverage >= self.config.min_frame_coverage:
-            score = 10
+            score = 10.0
         else:
-            score = (coverage / self.config.min_frame_coverage) * 10
-        
+            score = (coverage / self.config.min_frame_coverage) * 10.0
+
         return score, coverage
-    
+
+    # ------------------------------------------------------------------
     def _determine_grade(self, score: float) -> Grade:
         """점수로 등급 결정"""
         if score >= 90:
@@ -441,31 +591,40 @@ class QualityStats:
 
 
 if __name__ == "__main__":
-    # 테스트
-    evaluator = RobotArmQualityEvaluator()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="품질 평가 테스트")
+    parser.add_argument("--dir", default="data/episodes", help="에피소드 디렉토리")
+    parser.add_argument("--file", default=None, help="단일 npz 파일")
+    parser.add_argument("--threshold", type=float, default=60.0, help="통과 점수")
+    args = parser.parse_args()
+
+    config = QualityConfig(pass_threshold=args.threshold)
+    evaluator = RobotArmQualityEvaluator(config=config)
     stats = QualityStats()
-    
-    # 더미 데이터 테스트
-    import random
-    
-    for i in range(20):
-        # 랜덤 시퀀스 생성
-        num_frames = random.randint(30, 100)
-        body_frames = [
-            np.random.rand(33, 4) for _ in range(num_frames)
-        ]
-        right_hand = [
-            np.random.rand(21, 3) for _ in range(num_frames)
-        ]
-        
-        sequence = {
-            "body": body_frames,
-            "right_hand": right_hand,
-        }
-        
-        result = evaluator.evaluate(sequence, f"test_video_{i}")
+
+    if args.file:
+        npz_files = [Path(args.file)]
+    else:
+        ep_dir = Path(args.dir)
+        npz_files = sorted(ep_dir.glob("*.npz"))
+        # rejected 폴더에 있는 것도 포함
+        rejected = ep_dir / "rejected"
+        if rejected.exists():
+            npz_files += sorted(rejected.glob("*.npz"))
+
+    print(f"평가 대상: {len(npz_files)}개 파일\n")
+
+    for npz_path in npz_files:
+        result = evaluator.evaluate_npz(str(npz_path))
         stats.record(result)
-        
-        print(f"Video {i}: {result.total_score:.1f}점 ({result.grade.value})")
-    
+        status = "PASS" if result.passed else "FAIL"
+        print(
+            f"  [{status}] {result.video_id}: "
+            f"{result.total_score:.1f}점 ({result.grade.value}) "
+            f"J:{result.joint_score:.0f} M:{result.motion_score:.0f} "
+            f"G:{result.grasping_score:.0f} S:{result.stability_score:.0f} "
+            f"C:{result.coverage_score:.0f}"
+        )
+
     stats.print_report()

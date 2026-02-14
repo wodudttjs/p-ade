@@ -2,7 +2,7 @@
 import sqlite3
 from pathlib import Path
 
-db_path = Path(__file__).parent / "data" / "pade.db"
+db_path = Path(__file__).parent.parent.parent / "data" / "pade.db"
 conn = sqlite3.connect(str(db_path))
 cursor = conn.cursor()
 

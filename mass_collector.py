@@ -8,8 +8,10 @@ P-ADE 대량 수집 오케스트레이터
   1. 키워드 생성 → 다중 소스 크롤링 (URL 수집)
   2. 병렬 다운로드 (비디오 파일 저장)
   3. 객체 검출 & Episode 생성
-  4. S3 클라우드 업로드
-  5. 통계 리포트 출력
+  4. 모방학습 데이터 생성 (포즈 추출 → State-Action 인코딩)
+  5. 품질 평가 및 필터링
+  6. S3 클라우드 업로드
+  7. 통계 리포트 출력
 
 사용법:
     # 전체 파이프라인 실행 (500개 목표)
@@ -88,6 +90,11 @@ class PipelineConfig:
     quality_filter: bool = True  # 품질 필터링 활성화
     quality_threshold: float = 60.0  # 통과 점수 (100점 만점)
     
+    # 모방학습 데이터 생성 설정
+    build_il: bool = True  # 모방학습 데이터 생성 활성화
+    il_fps: float = 5.0  # 추출 FPS
+    il_max_frames: Optional[int] = None  # 비디오당 최대 프레임
+    
     # 업로드 설정
     s3_bucket: str = ""
     s3_prefix: str = "episodes"
@@ -145,6 +152,7 @@ class PipelineReport:
     total_crawled: int = 0
     total_downloaded: int = 0
     total_episodes: int = 0
+    total_il_episodes: int = 0
     total_uploaded: int = 0
     total_elapsed_sec: float = 0.0
     
@@ -166,6 +174,7 @@ class PipelineReport:
         print(f"    크롤링 URL: {self.total_crawled}개")
         print(f"    다운로드:   {self.total_downloaded}개")
         print(f"    에피소드:   {self.total_episodes}개")
+        print(f"    IL 데이터:  {self.total_il_episodes}개")
         print(f"    업로드:     {self.total_uploaded}개")
         print()
         for stage in self.stages:
@@ -181,14 +190,48 @@ class PipelineReport:
 class MassCollector:
     """대량 수집 파이프라인 오케스트레이터"""
 
-    STAGES = ["crawl", "download", "detect", "quality", "upload"]
+    STAGES = ["crawl", "download", "detect", "build_il", "quality", "upload"]
 
-    def __init__(self, config: PipelineConfig):
+    def __init__(self, config: PipelineConfig, on_stage_start=None, on_stage_complete=None, on_log=None):
+        """
+        Args:
+            config: 파이프라인 설정
+            on_stage_start: 스테이지 시작 콜백 fn(stage_name)
+            on_stage_complete: 스테이지 완료 콜백 fn(stage_name, result: StageResult)
+            on_log: 로그 콜백 fn(message: str)
+        """
         self.config = config
         self.report = PipelineReport(
             started_at=datetime.now().isoformat(),
             config=asdict(config),
         )
+        self._on_stage_start = on_stage_start
+        self._on_stage_complete = on_stage_complete
+        self._on_log = on_log
+
+    def _notify_stage_start(self, stage_name: str):
+        """스테이지 시작 알림"""
+        if self._on_stage_start:
+            try:
+                self._on_stage_start(stage_name)
+            except Exception:
+                pass
+
+    def _notify_stage_complete(self, stage_name: str, result: 'StageResult'):
+        """스테이지 완료 알림"""
+        if self._on_stage_complete:
+            try:
+                self._on_stage_complete(stage_name, result)
+            except Exception:
+                pass
+
+    def _notify_log(self, message: str):
+        """로그 알림"""
+        if self._on_log:
+            try:
+                self._on_log(message)
+            except Exception:
+                pass
 
     def run(self, start_stage: Optional[str] = None, end_stage: Optional[str] = None):
         """파이프라인 실행"""
@@ -204,15 +247,18 @@ class MassCollector:
 
         total_start = time.time()
 
-        print()
-        print("🚀" + "=" * 68)
-        print("   P-ADE 대량 수집 파이프라인")
-        print("=" * 70)
-        print(f"   목표: {self.config.target_count}개 영상")
-        print(f"   소스: {', '.join(self.config.sources)}")
-        print(f"   단계: {' → '.join(stages)}")
-        print(f"   드라이런: {'예' if self.config.dry_run else '아니오'}")
-        print("=" * 70)
+        header = (
+            f"\n🚀{'='*68}\n"
+            f"   P-ADE 대량 수집 파이프라인\n"
+            f"{'='*70}\n"
+            f"   목표: {self.config.target_count}개 영상\n"
+            f"   소스: {', '.join(self.config.sources)}\n"
+            f"   단계: {' → '.join(stages)}\n"
+            f"   드라이런: {'예' if self.config.dry_run else '아니오'}\n"
+            f"{'='*70}"
+        )
+        print(header)
+        self._notify_log(f"파이프라인 시작: {' → '.join(stages)} (목표: {self.config.target_count})")
 
         for stage_name in stages:
             print(f"\n{'─'*70}")
@@ -221,13 +267,30 @@ class MassCollector:
 
             handler = getattr(self, f"_stage_{stage_name}", None)
             if not handler:
-                logger.error(f"알 수 없는 단계: {stage_name}")
+                msg = f"알 수 없는 단계: {stage_name}"
+                logger.error(msg)
+                self._notify_log(f"[ERROR] {msg}")
                 continue
+
+            # 스테이지 시작 알림
+            self._notify_stage_start(stage_name)
+            self._notify_log(f"[INFO] ▶ {stage_name.upper()} 단계 시작...")
 
             try:
                 result = handler()
                 self.report.stages.append(asdict(result))
                 print(f"  {result.summary()}")
+
+                # 스테이지 완료 알림
+                self._notify_stage_complete(stage_name, result)
+                self._notify_log(f"[{'SUCCESS' if result.success else 'WARN'}] {result.summary()}")
+
+                # 실패 시에도 다음 단계로 계속 진행 (기존 데이터 활용)
+                if not result.success:
+                    msg = f"⚠️ {stage_name} 단계 실패 — 기존 데이터로 다음 단계를 계속 진행합니다."
+                    logger.warning(msg)
+                    self._notify_log(f"[WARN] {msg}")
+
             except Exception as e:
                 logger.error(f"단계 실패 [{stage_name}]: {e}")
                 result = StageResult(
@@ -236,14 +299,24 @@ class MassCollector:
                 )
                 self.report.stages.append(asdict(result))
                 print(f"  {result.summary()}")
-                # 크롤링/다운로드 실패 시에도 계속 진행
-                if stage_name in ("crawl",):
-                    print("  ⚠️  크롤링 실패, 기존 데이터로 계속 진행합니다.")
+
+                self._notify_stage_complete(stage_name, result)
+                self._notify_log(f"[ERROR] {stage_name} 단계 예외: {e}")
+
+                # 크롤링/다운로드 실패 시 기존 데이터로 계속 진행
+                if stage_name in ("crawl", "download"):
+                    print(f"  ⚠️  {stage_name} 실패, 기존 데이터로 계속 진행합니다.")
+                else:
+                    # 그 외 단계도 경고만 남기고 계속 진행
+                    msg = f"⚠️ {stage_name} 단계 예외 — 기존 데이터로 다음 단계를 계속 진행합니다."
+                    logger.warning(msg)
+                    self._notify_log(f"[WARN] {msg}")
 
         self.report.total_elapsed_sec = time.time() - total_start
         self.report.completed_at = datetime.now().isoformat()
         self.report.save(self.config.report_path)
         self.report.print_summary()
+        self._notify_log(f"[INFO] 파이프라인 완료 (소요: {self.report.total_elapsed_sec:.1f}초)")
 
     # ============================================================
     # 1단계: 크롤링
@@ -425,7 +498,7 @@ class MassCollector:
             )
 
         # parallel_download 모듈 사용
-        from parallel_download import parallel_download, save_results_to_db
+        from scripts.pipeline.parallel_download import parallel_download, save_results_to_db
 
         results = parallel_download(
             videos=videos,
@@ -462,12 +535,13 @@ class MassCollector:
     # ============================================================
 
     def _stage_detect(self) -> StageResult:
-        """객체 검출 및 Episode 생성 (GPU 3-Stream 통합)"""
+        """객체 검출 및 Episode 생성 (GPU 3-Stream 병렬 처리 통합)"""
         from extraction.detect_to_episodes import run as run_detect
 
         start = time.time()
         db_path = Path(self.config.db_path)
         output_dir = Path(self.config.episodes_dir)
+        raw_dir = Path(self.config.raw_dir)
 
         # 이미 생성된 에피소드 확인
         existing_episodes = set()
@@ -485,8 +559,10 @@ class MassCollector:
                 elapsed_sec=time.time() - start,
             )
 
-        # ── GPU 3-Stream 병렬 처리 ──
         gpu_info = {}
+        gpu_batch_used = False
+
+        # ── GPU 3-Stream 병렬 처리 시도 ──
         if self.config.use_gpu_streams:
             try:
                 from gpu.stream_manager import GPU3StreamManager
@@ -499,22 +575,56 @@ class MassCollector:
                     "vram_allocated_gb": vram.get("allocated", 0),
                 }
                 print(f"  🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+
+                # 미처리 비디오 수집
+                video_files = sorted(raw_dir.glob("*.mp4"))
+                pending = [str(v) for v in video_files if v.stem not in existing_episodes]
+
+                if pending:
+                    print(f"  🔍 GPU 3-Stream으로 {len(pending)}개 비디오 검출 처리...")
+                    detect_processor = stream_mgr.make_detect_processor(
+                        output_fps=self.config.detect_fps,
+                        device=self.config.detect_device,
+                    )
+                    results = stream_mgr.process_batch(pending[:self.config.target_count], detect_processor)
+
+                    # 결과를 npz로 저장
+                    import numpy as np
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    for r in results:
+                        if r.get("success") and r.get("detections"):
+                            from extraction.detect_to_episodes import _save_episode_npz
+                            out_path = output_dir / f"{r['video_id']}_episode.npz"
+                            metadata = {
+                                "video_id": r["video_id"],
+                                "source_path": r["video_path"],
+                                "num_frames": r["frames"],
+                                "output_fps": self.config.detect_fps,
+                            }
+                            _save_episode_npz(out_path, r["detections"], metadata)
+
+                    gpu_batch_used = True
+                    stream_mgr.print_stats()
+                    gpu_info["processed_by_gpu"] = sum(1 for r in results if r.get("success"))
+                    gpu_info["failed_by_gpu"] = sum(1 for r in results if not r.get("success"))
             except Exception as e:
-                logger.warning(f"GPU 3-Stream 초기화 실패, 기본 모드 사용: {e}")
+                logger.warning(f"GPU 3-Stream 검출 실패, 기본 모드로 폴백: {e}")
                 gpu_info = {"gpu_streams": False, "reason": str(e)}
 
-        # detect_to_episodes 실행
-        try:
-            run_detect(
-                db_path=db_path,
-                output_dir=output_dir,
-                limit=self.config.target_count,
-                use_redis=False,
-                output_fps=self.config.detect_fps,
-                device=self.config.detect_device,
-            )
-        except Exception as e:
-            logger.error(f"검출 실패: {e}")
+        # ── 폴백: 기본 순차 detect ──
+        if not gpu_batch_used:
+            try:
+                run_detect(
+                    db_path=db_path,
+                    output_dir=output_dir,
+                    limit=self.config.target_count,
+                    use_redis=False,
+                    output_fps=self.config.detect_fps,
+                    device=self.config.detect_device,
+                    use_gpu_streams=False,  # GPU 3-Stream은 이미 위에서 시도함
+                )
+            except Exception as e:
+                logger.error(f"검출 실패: {e}")
 
         # 새로 생성된 에피소드 확인
         new_episodes = set()
@@ -540,7 +650,149 @@ class MassCollector:
         )
 
     # ============================================================
-    # 3.5단계: 품질 평가 (Task 2.3 통합)
+    # 3.5단계: 모방학습 데이터 생성 (build_imitation_data)
+    # ============================================================
+
+    def _stage_build_il(self) -> StageResult:
+        """비디오 → 포즈 추출 → State-Action 인코딩 → .npz 저장 (GPU 3-Stream 병렬 처리)"""
+        from scripts.pipeline.build_imitation_data import process_single_video
+        import numpy as np
+
+        start = time.time()
+        raw_dir = Path(self.config.raw_dir)
+        episodes_dir = Path(self.config.episodes_dir)
+        episodes_dir.mkdir(parents=True, exist_ok=True)
+
+        # 다운로드된 비디오 목록
+        videos = sorted(raw_dir.glob("*.mp4"))
+        if not videos:
+            return StageResult(
+                stage="build_il", success=False, errors=1,
+                details={"error": "모방학습 데이터로 변환할 비디오가 없습니다"},
+                elapsed_sec=time.time() - start,
+            )
+
+        # 이미 IL 데이터가 있는 비디오 스킵
+        existing_il = set()
+        for f in episodes_dir.glob("*_episode.npz"):
+            try:
+                d = np.load(str(f), allow_pickle=True)
+                if "states" in d and "actions" in d:
+                    existing_il.add(f.stem.replace("_episode", ""))
+            except Exception:
+                pass
+
+        pending = [v for v in videos if v.stem not in existing_il]
+        print(f"  📂 비디오: {len(videos)}개 (기존 IL: {len(existing_il)}개, 대상: {len(pending)}개)")
+
+        if not pending:
+            return StageResult(
+                stage="build_il", success=True, count=len(existing_il),
+                details={"message": "모든 비디오의 IL 데이터가 이미 존재합니다", "skipped": len(existing_il)},
+                elapsed_sec=time.time() - start,
+            )
+
+        if self.config.dry_run:
+            return StageResult(
+                stage="build_il", success=True, count=0,
+                details={"target": len(pending), "dry_run": True},
+                elapsed_sec=time.time() - start,
+            )
+
+        success_count = 0
+        fail_count = 0
+        gpu_used = False
+        gpu_info = {}
+
+        # ── GPU 3-Stream 병렬 처리 시도 ──
+        if self.config.use_gpu_streams:
+            try:
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                print(f"  🎮 GPU 3-Stream IL 생성 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+
+                il_processor = stream_mgr.make_il_processor(
+                    output_fps=self.config.il_fps,
+                    max_frames=self.config.il_max_frames,
+                    output_dir=str(episodes_dir),
+                )
+                pending_paths = [str(v) for v in pending]
+                results = stream_mgr.process_batch(pending_paths, il_processor)
+
+                for r in results:
+                    if r and r.get("success"):
+                        if r.get("status") == "skipped":
+                            print(f"  ⏭️  {r.get('video_id', '?')}: {r.get('msg', 'skipped')}")
+                        else:
+                            print(f"  ✅ {r.get('video_id', '?')}: {r.get('frames', 0)}f "
+                                  f"S:{r.get('state_dim', '?')} A:{r.get('action_dim', '?')}")
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                        print(f"  ❌ {r.get('video_id', '?')}: {r.get('error', 'unknown')}")
+
+                stream_mgr.print_stats()
+                gpu_used = True
+                gpu_info = {
+                    "gpu_streams": True,
+                    "batch_size": batch_size,
+                    "vram_gb": vram.get("allocated", 0),
+                    "peak_vram_gb": stream_mgr.stats.get("peak_vram_gb", 0),
+                }
+            except Exception as e:
+                logger.warning(f"GPU 3-Stream IL 생성 실패, 순차 모드로 폴백: {e}")
+                gpu_info = {"gpu_streams": False, "reason": str(e)}
+
+        # ── 폴백: 순차 처리 ──
+        if not gpu_used:
+            total = len(pending)
+            for i, video_path in enumerate(pending, 1):
+                vid = video_path.stem
+                print(f"  [{i}/{total}] {vid}...", end=" ", flush=True)
+
+                task = (
+                    str(video_path),
+                    str(episodes_dir),
+                    self.config.il_fps,
+                    self.config.il_max_frames,
+                    i,
+                    total,
+                )
+
+                result = process_single_video(task)
+
+                if result["status"] == "success":
+                    success_count += 1
+                    print(f"✅ {result['frames']}f S:{result['state_dim']} A:{result['action_dim']} ({result['time']}s)")
+                elif result["status"] == "skipped":
+                    success_count += 1
+                    print(f"⏭️  {result['msg']}")
+                else:
+                    fail_count += 1
+                    print(f"❌ {result.get('msg', 'unknown')}")
+
+        total_il = len(existing_il) + success_count
+
+        return StageResult(
+            stage="build_il",
+            success=success_count > 0 or len(existing_il) > 0,
+            count=success_count,
+            errors=fail_count,
+            elapsed_sec=time.time() - start,
+            details={
+                "total_il_episodes": total_il,
+                "new_built": success_count,
+                "previously_built": len(existing_il),
+                "failed": fail_count,
+                "fps": self.config.il_fps,
+                **gpu_info,
+            },
+        )
+
+    # ============================================================
+    # 4단계: 품질 평가 (Task 2.3 통합)
     # ============================================================
 
     def _stage_quality(self) -> StageResult:
@@ -594,17 +846,8 @@ class MassCollector:
 
         for npz_path in npz_files:
             try:
-                data = np.load(str(npz_path), allow_pickle=True)
-
-                # 시퀀스 데이터 추출
-                sequence = {
-                    "body": data.get("body_landmarks", data.get("poses", np.array([]))),
-                    "left_hand": data.get("left_hand_landmarks", np.array([])),
-                    "right_hand": data.get("right_hand_landmarks", np.array([])),
-                }
-
                 video_id = npz_path.stem.replace("_episode", "")
-                result = evaluator.evaluate(sequence, video_id=video_id)
+                result = evaluator.evaluate_npz(str(npz_path), video_id=video_id)
                 stats.record(result)
 
                 if result.passed:
@@ -681,7 +924,7 @@ class MassCollector:
 
         # upload_to_s3 모듈 사용
         try:
-            from upload_to_s3 import get_s3_provider, get_bucket_name, upload_file
+            from scripts.pipeline.upload_to_s3 import get_s3_provider, get_bucket_name, upload_file
 
             provider = get_s3_provider()
             bucket = self.config.s3_bucket or get_bucket_name()
@@ -798,7 +1041,7 @@ def main():
     )
 
     parser.add_argument("--target", type=int, default=500, help="수집 목표 수 (기본: 500)")
-    parser.add_argument("--stage", help="단일 단계 실행: crawl, download, detect, quality, upload")
+    parser.add_argument("--stage", help="단일 단계 실행: crawl, download, detect, build_il, quality, upload")
     parser.add_argument("--start-stage", help="시작 단계")
     parser.add_argument("--end-stage", help="종료 단계")
     parser.add_argument("--keywords", help="커스텀 키워드 (콤마 구분)")
@@ -824,6 +1067,9 @@ def main():
     parser.add_argument("--no-gpu-streams", action="store_true", help="GPU 3-Stream 비활성화")
     parser.add_argument("--no-quality-filter", action="store_true", help="품질 필터링 비활성화")
     parser.add_argument("--quality-threshold", type=float, default=60.0, help="품질 통과 점수 (기본: 60)")
+    parser.add_argument("--no-build-il", action="store_true", help="모방학습 데이터 생성 비활성화")
+    parser.add_argument("--il-fps", type=float, default=5.0, help="IL 추출 FPS (기본: 5)")
+    parser.add_argument("--il-max-frames", type=int, default=None, help="IL 비디오당 최대 프레임")
 
     args = parser.parse_args()
 
@@ -850,6 +1096,9 @@ def main():
         use_gpu_streams=not args.no_gpu_streams,
         quality_filter=not args.no_quality_filter,
         quality_threshold=args.quality_threshold,
+        build_il=not args.no_build_il,
+        il_fps=args.il_fps,
+        il_max_frames=args.il_max_frames,
     )
 
     # 커스텀 키워드 적용

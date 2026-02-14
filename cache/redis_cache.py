@@ -7,9 +7,12 @@ Redis 기반 크롤링 캐시 시스템
 import json
 import hashlib
 import time
+import logging
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from datetime import datetime
+
+_logger = logging.getLogger(__name__)
 
 try:
     import redis
@@ -71,6 +74,7 @@ class CrawlCache:
     def _connect(self) -> bool:
         """Redis 연결"""
         if not REDIS_AVAILABLE:
+            _logger.warning("redis 패키지가 설치되지 않음")
             return False
         
         try:
@@ -80,27 +84,38 @@ class CrawlCache:
                 db=self.config.db,
                 password=self.config.password,
                 decode_responses=True,
-                socket_timeout=5,
-                socket_connect_timeout=5,
+                socket_timeout=3,
+                socket_connect_timeout=3,
+                retry_on_timeout=False,
             )
             # 연결 테스트
-            self._client.ping()
+            result = self._client.ping()
             self._connected = True
+            _logger.info(f"Redis 연결 성공 ({self.config.host}:{self.config.port})")
             return True
-        except redis.ConnectionError:
+        except Exception as e:
+            _logger.warning(f"Redis 연결 실패: {type(e).__name__}: {e}")
             self._connected = False
+            self._client = None
             return False
     
+    def reconnect(self) -> bool:
+        """재연결 시도"""
+        self._connected = False
+        self._client = None
+        return self._connect()
+
     @property
     def is_connected(self) -> bool:
-        """연결 상태 확인"""
+        """연결 상태 확인 (실패 시 1회 재연결 시도)"""
         if not self._client:
-            return False
+            return self._connect()
         try:
             self._client.ping()
             return True
-        except:
-            return False
+        except Exception:
+            # 1회 재연결 시도
+            return self._connect()
     
     # =========================================================================
     # 검색 결과 캐싱
@@ -347,10 +362,13 @@ _default_cache: Optional[CrawlCache] = None
 
 
 def get_cache() -> CrawlCache:
-    """기본 캐시 인스턴스 반환"""
+    """기본 캐시 인스턴스 반환 (미연결 시 재연결 시도)"""
     global _default_cache
     if _default_cache is None:
         _default_cache = CrawlCache()
+    # 연결이 끊어진 경우 재연결 시도
+    if not _default_cache._connected:
+        _default_cache.reconnect()
     return _default_cache
 
 

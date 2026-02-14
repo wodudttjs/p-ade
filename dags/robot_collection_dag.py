@@ -112,7 +112,7 @@ def build_imitation_data(**context):
     
     cmd = [
         sys.executable,
-        str(PROJECT_ROOT / "build_imitation_data.py"),
+        str(PROJECT_ROOT / "scripts" / "pipeline" / "build_imitation_data.py"),
         "--fps", "5",
         "--max-frames", "100",
     ]

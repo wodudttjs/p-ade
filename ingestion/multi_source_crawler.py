@@ -382,13 +382,19 @@ class MultiSourceCrawler:
         if self.use_cache:
             try:
                 self._cache = get_cache()
-                if self._cache.is_connected:
+                logger.info(f"🔍 캐시 상태: _connected={self._cache._connected}, client={self._cache._client is not None}")
+                if self._cache._connected or self._cache.is_connected:
                     logger.info("✅ Redis 캐시 연결됨")
                 else:
-                    logger.warning("⚠️ Redis 연결 실패, 캐시 없이 진행")
-                    self._cache = None
+                    # 재연결 시도
+                    logger.info("🔄 Redis 재연결 시도 중...")
+                    if self._cache.reconnect():
+                        logger.info("✅ Redis 캐시 재연결 성공")
+                    else:
+                        logger.warning("⚠️ Redis 연결 실패, 캐시 없이 진행")
+                        self._cache = None
             except Exception as e:
-                logger.warning(f"⚠️ 캐시 초기화 실패: {e}")
+                logger.warning(f"⚠️ 캐시 초기화 실패: {type(e).__name__}: {e}")
                 self._cache = None
 
     def crawl(

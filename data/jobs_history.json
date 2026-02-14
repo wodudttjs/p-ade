@@ -1,0 +1,90 @@
+[
+ {
+  "id": 8,
+  "job_key": "auto_6_123043",
+  "stage": "all",
+  "status": "completed",
+  "started_at": "2026-02-14T09:00:41.421538",
+  "completed_at": "2026-02-14 12:30:43",
+  "progress": 100,
+  "stages_done": 6,
+  "stages_total": 6
+ },
+ {
+  "id": 7,
+  "job_key": "auto_5_090011",
+  "stage": "all",
+  "status": "completed",
+  "started_at": "2026-02-14T05:35:30.429692",
+  "completed_at": "2026-02-14 09:00:11",
+  "progress": 100,
+  "stages_done": 6,
+  "stages_total": 6
+ },
+ {
+  "id": 6,
+  "job_key": "auto_4_053500",
+  "stage": "all",
+  "status": "completed",
+  "started_at": "2026-02-14T02:26:56.974118",
+  "completed_at": "2026-02-14 05:35:00",
+  "progress": 100,
+  "stages_done": 6,
+  "stages_total": 6
+ },
+ {
+  "id": 5,
+  "job_key": "auto_3_022626",
+  "stage": "all",
+  "status": "completed",
+  "started_at": "2026-02-14T00:07:04.139793",
+  "completed_at": "2026-02-14 02:26:26",
+  "progress": 100,
+  "stages_done": 6,
+  "stages_total": 6
+ },
+ {
+  "id": 4,
+  "job_key": "auto_2_000634",
+  "stage": "all",
+  "status": "completed",
+  "started_at": "2026-02-13T21:44:12.666333",
+  "completed_at": "2026-02-14 00:06:34",
+  "progress": 100,
+  "stages_done": 6,
+  "stages_total": 6
+ },
+ {
+  "id": 3,
+  "job_key": "auto_1_214342",
+  "stage": "all",
+  "status": "partial",
+  "started_at": "2026-02-13T19:36:19.628336",
+  "completed_at": "2026-02-13 21:43:42",
+  "progress": 83,
+  "stages_done": 5,
+  "stages_total": 6
+ },
+ {
+  "id": 2,
+  "job_key": "auto_1_193058",
+  "stage": "all",
+  "status": "partial",
+  "started_at": "2026-02-13T19:27:36.917457",
+  "completed_at": "2026-02-13 19:30:58",
+  "progress": 16,
+  "stages_done": 1,
+  "stages_total": 6
+ },
+ {
+  "id": 1,
+  "job_key": "auto_1_192153",
+  "stage": "all",
+  "status": "partial",
+  "started_at": "2026-02-13T19:18:41.504123",
+  "completed_at": "2026-02-13 19:21:53",
+  "progress": 16,
+  "stages_done": 1,
+  "stages_total": 6
+ }
+]

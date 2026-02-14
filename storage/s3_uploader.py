@@ -8,7 +8,7 @@ import sys
 import argparse
 from pathlib import Path
 
-import upload_to_s3
+import scripts.pipeline.upload_to_s3 as upload_to_s3
 
 
 def main():

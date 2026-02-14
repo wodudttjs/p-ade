@@ -2,9 +2,14 @@
 로봇팔 관련 영상만 남기고 DB/파일 정리
 """
 
+import sys
 import argparse
 from pathlib import Path
 from typing import List
+
+# 프로젝트 루트 추가
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker

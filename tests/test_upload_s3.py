@@ -20,7 +20,7 @@ class TestUploadToS3:
     
     def test_find_pose_files(self, tmp_path):
         """포즈 파일 찾기 테스트"""
-        from upload_to_s3 import find_pose_files
+        from scripts.pipeline.upload_to_s3 import find_pose_files
         
         # 임시 포즈 파일 생성
         poses_dir = tmp_path / "data" / "poses"
@@ -38,7 +38,7 @@ class TestUploadToS3:
         
     def test_generate_s3_key(self):
         """S3 키 생성 테스트"""
-        from upload_to_s3 import generate_s3_key
+        from scripts.pipeline.upload_to_s3 import generate_s3_key
         
         local_path = Path("/some/path/video123_pose.npz")
         key = generate_s3_key(local_path, prefix="poses")
@@ -57,7 +57,7 @@ class TestUploadToS3:
         
     def test_generate_s3_key_custom_prefix(self):
         """커스텀 prefix로 S3 키 생성"""
-        from upload_to_s3 import generate_s3_key
+        from scripts.pipeline.upload_to_s3 import generate_s3_key
         
         local_path = Path("test_file.npz")
         key = generate_s3_key(local_path, prefix="episodes")
@@ -66,7 +66,7 @@ class TestUploadToS3:
         
     def test_get_file_metadata(self, tmp_path):
         """파일 메타데이터 생성 테스트"""
-        from upload_to_s3 import get_file_metadata
+        from scripts.pipeline.upload_to_s3 import get_file_metadata
         
         # 테스트 파일 생성
         test_file = tmp_path / "test_pose.npz"
@@ -82,7 +82,7 @@ class TestUploadToS3:
         
     def test_get_bucket_name_default(self):
         """기본 버킷 이름 테스트"""
-        from upload_to_s3 import get_bucket_name
+        from scripts.pipeline.upload_to_s3 import get_bucket_name
         
         bucket = get_bucket_name()
         assert bucket is not None
@@ -91,7 +91,7 @@ class TestUploadToS3:
         
     def test_get_bucket_name_from_env(self, monkeypatch):
         """환경변수에서 버킷 이름 가져오기"""
-        from upload_to_s3 import get_bucket_name
+        from scripts.pipeline.upload_to_s3 import get_bucket_name
         
         monkeypatch.setenv("S3_BUCKET", "my-custom-bucket")
         bucket = get_bucket_name()
@@ -99,7 +99,7 @@ class TestUploadToS3:
         
     def test_upload_file_dry_run(self, tmp_path):
         """Dry-run 모드 업로드 테스트"""
-        from upload_to_s3 import upload_file
+        from scripts.pipeline.upload_to_s3 import upload_file
         
         # 테스트 파일 생성
         test_file = tmp_path / "test_pose.npz"
@@ -118,7 +118,7 @@ class TestUploadToS3:
         
     def test_upload_file_not_found(self):
         """존재하지 않는 파일 업로드 시도"""
-        from upload_to_s3 import upload_file
+        from scripts.pipeline.upload_to_s3 import upload_file
         
         mock_provider = Mock()
         result = upload_file(
