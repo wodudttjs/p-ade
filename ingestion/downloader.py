@@ -245,7 +245,7 @@ REJECT_KEYWORDS = [
     "toy", "lego", "surgery", "medical",
 ]
 
-MIN_DURATION_SEC = 60
+MIN_DURATION_SEC = 10
 MAX_DURATION_SEC = 300
 MIN_HEIGHT = 480
 MIN_FPS = 24

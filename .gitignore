@@ -80,13 +80,3 @@ temp/
 mediapipe_resources/
 vendor/
 yolov8n.pt
-
-# Large data files
-data/raw/*.mp4
-data/episodes/*.npz
-data/poses/*.npz
-*.db
-logs/*.log
-yolov8*.pt
-*.pt
-*.pth

@@ -1,6 +1,6 @@
 # P-ADE (Physical AI Data Engine)
 
-웹 비디오 자원을 자동 수집하여 로봇 모방학습용 (State, Action) 데이터셋으로 변환하는 End-to-End 파이프라인
+웹 비디오 자원을 자동 수집하여 로봇 학습용 (State, Action) 데이터셋으로 변환하는 End-to-End 파이프라인
 
 ## 🎯 프로젝트 개요
 
@@ -183,7 +183,7 @@ p-ade-master/
 
 ## 🚀 빠른 시작
 
-### 1. 설치
+### 설치
 
 ```bash
 # 가상환경 생성
@@ -198,7 +198,7 @@ sudo apt install redis-server
 sudo systemctl start redis
 ```
 
-### 2. 환경설정
+### 환경설정
 
 ```bash
 # .env 파일 생성 (.env.example 참고)
@@ -278,6 +278,20 @@ data['video_id']      # str        - 원본 비디오 ID
 data['fps']           # float      - 추출 FPS
 ```
 
+### 빠른 사용 예시
+```python
+# 모방학습 학습 루프
+data = np.load('data/episodes/video_episode.npz', allow_pickle=True)
+states = data['states']    # [T, 199]
+actions = data['actions']  # [T-1, 100]
+
+for t in range(len(actions)):
+    state = states[t]      # 현재 상태
+    action = actions[t]    # 취해야 할 행동
+    next_state = states[t+1]  # 다음 상태
+    # policy.train(state, action)
+```
+
 ## 🛠️ 기술 스택
 
 | 영역 | 기술 |
@@ -293,3 +307,7 @@ data['fps']           # float      - 추출 FPS
 | **웹 UI** | Flask, Bootstrap 5, 실시간 로그 |
 | **모니터링** | loguru, psutil, GPU/VRAM 모니터 |
 | **테스트** | pytest |
+
+## 📝 라이선스
+
+MIT License

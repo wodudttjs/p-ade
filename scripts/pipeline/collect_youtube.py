@@ -197,7 +197,7 @@ def save_to_database(videos: List[dict], db_path: str = "data/pade.db"):
 def main():
     parser = argparse.ArgumentParser(description="YouTube 영상 수집")
     parser.add_argument("keyword", help="검색 키워드")
-    parser.add_argument("-n", "--max-results", type=int, default=50, help="최대 결과 수 (기본: 50)")
+    parser.add_argument("-n", "--max-results", type=int, default=10, help="최대 결과 수 (기본: 10)")
     parser.add_argument("-d", "--download", action="store_true", help="비디오 다운로드")
     parser.add_argument("-q", "--quality", default="720p", choices=["360p", "720p", "1080p"], help="다운로드 품질")
     parser.add_argument("-o", "--output", default="data/raw", help="출력 디렉토리")

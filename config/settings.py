@@ -92,26 +92,6 @@ class Config:
     ENABLE_METRICS: bool = os.getenv("ENABLE_METRICS", "true").lower() == "true"
     METRICS_PORT: int = int(os.getenv("METRICS_PORT", "9090"))
     
-    # ===== 대량 수집 파이프라인 설정 =====
-    MASS_COLLECT_TARGET: int = int(os.getenv("MASS_COLLECT_TARGET", "500"))
-    MASS_COLLECT_SOURCES: list = os.getenv(
-        "MASS_COLLECT_SOURCES", "youtube,google_videos"
-    ).split(",")
-    MASS_COLLECT_LANGUAGES: list = os.getenv(
-        "MASS_COLLECT_LANGUAGES", "en,ko"
-    ).split(",")
-    MASS_COLLECT_CRAWL_WORKERS: int = int(os.getenv("MASS_COLLECT_CRAWL_WORKERS", "4"))
-    MASS_COLLECT_DOWNLOAD_WORKERS: int = int(os.getenv("MASS_COLLECT_DOWNLOAD_WORKERS", "6"))
-    MASS_COLLECT_DOWNLOAD_TIMEOUT: int = int(os.getenv("MASS_COLLECT_DOWNLOAD_TIMEOUT", "600"))
-    MASS_COLLECT_DETECT_FPS: float = float(os.getenv("MASS_COLLECT_DETECT_FPS", "5.0"))
-    MASS_COLLECT_DETECT_DEVICE: Optional[str] = os.getenv("MASS_COLLECT_DETECT_DEVICE")
-    
-    # 레이트 리밋 설정
-    RATE_LIMIT_YOUTUBE_RPM: int = int(os.getenv("RATE_LIMIT_YOUTUBE_RPM", "20"))
-    RATE_LIMIT_GOOGLE_RPM: int = int(os.getenv("RATE_LIMIT_GOOGLE_RPM", "15"))
-    RATE_LIMIT_MIN_DELAY: float = float(os.getenv("RATE_LIMIT_MIN_DELAY", "2.0"))
-    RATE_LIMIT_MAX_DELAY: float = float(os.getenv("RATE_LIMIT_MAX_DELAY", "5.0"))
-    
     @classmethod
     def ensure_directories(cls):
         """필수 디렉토리 생성"""

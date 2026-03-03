@@ -23,19 +23,15 @@ from models.database import Base, Video, Episode
 logger = setup_logger(__name__)
 
 REQUIRED_KEYWORDS = [
-    "robot", "robotic", "arm", "gripper", "manipulator",
+    "robot arm", "robotic arm", "robot gripper",
     "pick and place", "pick & place", "grasping",
     "manipulation", "object manipulation",
-    "assembly", "bin picking", "cobot",
-    "FANUC", "ABB", "KUKA", "UR5", "UR10", "UR3",
-    "industrial", "automation", "manufacturing",
-    "로봇", "로봇팔", "그리퍼",
+    "assembly", "bin picking",
 ]
 
 REJECT_KEYWORDS = [
     "animation", "simulation", "cgi", "3d render",
     "toy", "lego", "surgery", "medical",
-    "minecraft", "roblox", "cartoon", "game",
 ]
 
 
@@ -43,8 +39,7 @@ def _matches_keywords(text: str) -> bool:
     lowered = text.lower()
     if any(bad in lowered for bad in REJECT_KEYWORDS):
         return False
-    # 크롤링 단계에서 이미 필터된 영상이므로 키워드 있으면 통과, 없어도 통과(downloaded 상태면)
-    return True
+    return any(key in lowered for key in REQUIRED_KEYWORDS)
 
 
 def _get_db_session(db_path: Path):
@@ -140,7 +135,7 @@ def _update_episode_db(session, video: Video, output_path: Path, detector: Objec
 def _clear_all_queues(use_redis: bool):
     qm = QueueManager(use_redis=use_redis)
     qm.clear_all()
-    logger.info("🧹 큐 정리 완료")
+    logger.info("큐 정리 완료")
 
 
 def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps: float, device: str = None,
@@ -180,7 +175,7 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
                 stream_mgr = GPU3StreamManager()
                 batch_size = stream_mgr.auto_adjust_batch_size()
                 vram = stream_mgr.get_vram_usage()
-                logger.info(f"🎮 GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
+                logger.info(f"GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
 
                 video_paths = [v.local_path for v in videos if v.local_path and Path(v.local_path).exists()]
                 existing = {p.stem.replace("_episode", "") for p in output_dir.glob("*.npz")} if output_dir.exists() else set()
@@ -204,9 +199,9 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
                                 "output_fps": output_fps,
                             }
                             _save_episode_npz(out_path, r["detections"], metadata)
-                            logger.info(f"✅ 검출 완료: {r['video_id']}")
+                            logger.info(f"검출 완료: {r['video_id']}")
                         else:
-                            logger.warning(f"❌ 검출 실패: {r.get('video_id', '?')}: {r.get('error', '')}")
+                            logger.warning(f"검출 실패: {r.get('video_id', '?')}: {r.get('error', '')}")
 
                     stream_mgr.print_stats()
                     gpu_batch_used = True
@@ -219,7 +214,7 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
 
             for idx, video in enumerate(videos, 1):
                 start_time = time.time()
-                logger.info(f"🔍 검출 시작 ({idx}/{len(videos)}): {video.video_id}")
+                logger.info(f"검출 시작 ({idx}/{len(videos)}): {video.video_id}")
 
                 try:
                     detections = detector.detect_video(
@@ -243,10 +238,10 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
                     session.commit()
 
                     elapsed = time.time() - start_time
-                    logger.info(f"✅ 검출 완료: {video.video_id} ({elapsed:.2f}s)")
+                    logger.info(f"검출 완료: {video.video_id} ({elapsed:.2f}s)")
                 except Exception as e:
                     elapsed = time.time() - start_time
-                    logger.error(f"❌ 검출 실패: {video.video_id} ({elapsed:.2f}s) - {e}")
+                    logger.error(f"검출 실패: {video.video_id} ({elapsed:.2f}s) - {e}")
 
     finally:
         session.close()
@@ -255,10 +250,10 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
 
 
 def main():
-    parser = argparse.ArgumentParser(description="로봇팔 영상 객체 검출 → episodes 저장 (대량 수집 지원)")
+    parser = argparse.ArgumentParser(description="로봇팔 영상 10개 객체 검출 → episodes 저장")
     parser.add_argument("--db", default="data/pade.db", help="SQLite DB 경로")
     parser.add_argument("--output-dir", default="data/episodes", help="episodes 출력 경로")
-    parser.add_argument("--limit", type=int, default=500, help="처리할 영상 수 (기본 500)")
+    parser.add_argument("--limit", type=int, default=10, help="처리할 영상 수")
     parser.add_argument("--redis", action="store_true", help="Redis 큐 사용")
     parser.add_argument("--output-fps", type=float, default=5.0, help="검출 FPS (기본 5)")
     parser.add_argument("--device", default=None, help="모델 실행 디바이스 (예: 'cuda:0' 또는 'cpu')")

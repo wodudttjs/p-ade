@@ -137,37 +137,20 @@ class ObjectDetector:
         logger.info(f"Target classes: {len(self.target_classes)}")
     
     def _load_model(self):
-        """YOLO 모델 지연 로딩 (다양한 ultralytics 버전 대비 장치 설정 시도)"""
+        """YOLO 모델 지연 로딩"""
         if self.model is not None:
             return
-
+        
         try:
             from ultralytics import YOLO
-            import torch
-
             logger.info(f"Loading YOLO model: {self.model_name}")
-
-            # Instantiate model (avoid passing device arg which may not be supported)
             self.model = YOLO(self.model_name)
-
-            # 여러 방법으로 모델을 요청한 디바이스로 이동 시도
-            try:
-                # ultralytics YOLO 객체에 .to()가 구현된 경우 사용
-                self.model.to(self.device)
-            except Exception:
-                try:
-                    # 내부에 torch.nn.Module 형태의 .model 어트리뷰트가 있으면 직접 이동
-                    internal_model = getattr(self.model, "model", None)
-                    if internal_model is not None:
-                        dev = torch.device(self.device if isinstance(self.device, str) else str(self.device))
-                        internal_model.to(dev)
-                except Exception as e:
-                    logger.warning(f"Could not move internal model to device: {e}")
-
-            # 클래스 이름 매핑 (없을 수 있으므로 안전하게 가져옴)
-            self.class_names = getattr(self.model, "names", {}) or {}
-
-            logger.info(f"YOLO model loaded (requested device: {self.device})")
+            self.model.to(self.device)
+            
+            # 클래스 이름 매핑
+            self.class_names = self.model.names  # {id: name}
+            
+            logger.info(f"YOLO model loaded on {self.device}")
         except ImportError:
             logger.error("ultralytics not installed. Install with: pip install ultralytics")
             raise

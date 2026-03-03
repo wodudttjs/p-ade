@@ -29,24 +29,21 @@ class BaseSpider(scrapy.Spider, ABC):
         'USER_AGENT': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
     }
     
-    def __init__(self, keywords: List[str], max_results: int = 100, pages: int = 1, *args, **kwargs):
+    def __init__(self, keywords: List[str], max_results: int = 100, *args, **kwargs):
         """
         Args:
             keywords: 검색할 키워드 리스트
             max_results: 최대 결과 수
-            pages: 검색 페이지 수 (페이지네이션을 지원하는 스파이더에서 사용)
         """
         super().__init__(*args, **kwargs)
         self.keywords = keywords if isinstance(keywords, list) else [keywords]
         self.max_results = max_results
-        self.pages = max(1, int(pages))
         self.results_count = 0
         self.user_agents = self._load_user_agents()
         
         logger.info(f"Spider initialized: {self.name}")
         logger.info(f"Keywords: {self.keywords}")
         logger.info(f"Max results: {max_results}")
-        logger.info(f"Pages: {self.pages}")
     
     def _load_user_agents(self) -> List[str]:
         """다양한 User-Agent 문자열 로드"""
@@ -65,20 +62,15 @@ class BaseSpider(scrapy.Spider, ABC):
                 break
                 
             logger.info(f"Starting search for keyword: {keyword}")
-
-            # 페이지네이션 지원: 페이지 인덱스를 meta로 전달
-            for page in range(1, self.pages + 1):
-                if not self.should_continue_crawling():
-                    break
-
-                url = self.build_search_url(keyword, page=page)
-                yield scrapy.Request(
-                    url=url,
-                    callback=self.parse_search_results,
-                    errback=self.handle_error,
-                    headers=self._get_random_headers(),
-                    meta={'keyword': keyword, 'page': page}
-                )
+            url = self.build_search_url(keyword, page=1)
+            
+            yield scrapy.Request(
+                url=url,
+                callback=self.parse_search_results,
+                errback=self.handle_error,
+                headers=self._get_random_headers(),
+                meta={'keyword': keyword, 'page': 1}
+            )
     
     @abstractmethod
     def build_search_url(self, keyword: str, page: int = 1) -> str:
