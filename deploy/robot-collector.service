@@ -1,0 +1,64 @@
+# /etc/systemd/system/robot-collector.service
+#
+# P-ADE 로봇팔 영상 수집 서비스
+#
+# 설치:
+#   sudo cp deploy/robot-collector.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable robot-collector
+#   sudo systemctl start robot-collector
+#
+# 상태 확인:
+#   sudo systemctl status robot-collector
+#   sudo journalctl -u robot-collector -f
+
+[Unit]
+Description=P-ADE Robot Arm Video Collection Service
+After=network.target redis.service postgresql.service
+Wants=redis.service postgresql.service
+Documentation=https://github.com/your-org/p-ade
+
+[Service]
+Type=simple
+User=robotuser
+Group=robotuser
+WorkingDirectory=/home/robotuser/p-ade
+
+# 환경 변수
+Environment="PATH=/home/robotuser/p-ade/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="ENVIRONMENT=production"
+
+# 실행 명령
+ExecStart=/home/robotuser/p-ade/.venv/bin/python main.py run-forever --target 500 --interval 60
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+# 재시작 정책
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# 타임아웃
+TimeoutStartSec=30
+TimeoutStopSec=60
+
+# 보안 설정
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/robotuser/p-ade/data /home/robotuser/p-ade/logs /tmp
+ProtectHome=read-only
+PrivateTmp=true
+
+# 로그 (journald)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=robot-collector
+
+# 리소스 제한
+LimitNOFILE=65536
+MemoryMax=8G
+
+[Install]
+WantedBy=multi-user.target

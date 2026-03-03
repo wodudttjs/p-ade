@@ -77,4 +77,18 @@ __all__ = [
     "ReportGenerator",
     "get_report_generator",
     "generate_quality_report",
+    # evaluator (로봇팔 영상 품질)
+    "RobotArmQualityEvaluator",
+    "QualityConfig",
+    "EvaluationResult",
 ]
+
+# 로봇팔 영상 품질 평가 (선택적 임포트)
+try:
+    from quality.evaluator import (
+        RobotArmQualityEvaluator,
+        QualityConfig,
+        EvaluationResult,
+    )
+except ImportError:
+    pass

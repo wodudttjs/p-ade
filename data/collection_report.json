@@ -1,8 +1,8 @@
 {
-  "started_at": "2026-02-08T02:42:28.543202",
-  "completed_at": "2026-02-08T02:44:04.687136",
+  "started_at": "2026-02-14T09:00:41.421514",
+  "completed_at": "2026-02-14T12:30:43.188062",
   "config": {
-    "target_count": 1,
+    "target_count": 500,
     "sources": [
       "youtube",
       "google_videos"
@@ -16,12 +16,20 @@
     "min_duration_sec": 30,
     "max_duration_sec": 1200,
     "content_filter": true,
+    "use_multiprocess": false,
+    "use_async": false,
     "download_workers": 6,
     "download_timeout": 600,
     "download_quality": "720p",
     "detect_fps": 5.0,
     "detect_device": null,
     "detect_batch_size": 50,
+    "use_gpu_streams": true,
+    "quality_filter": true,
+    "quality_threshold": 60.0,
+    "build_il": true,
+    "il_fps": 5.0,
+    "il_max_frames": null,
     "s3_bucket": "",
     "s3_prefix": "episodes",
     "upload_workers": 4,
@@ -31,24 +39,112 @@
     "urls_csv": "data/urls_mass.csv",
     "report_path": "data/collection_report.json",
     "dry_run": false,
-    "resume": true
+    "resume": true,
+    "custom_keywords": null
   },
   "stages": [
     {
+      "stage": "crawl",
+      "success": true,
+      "count": 456,
+      "errors": 0,
+      "elapsed_sec": 235.92842268943787,
+      "details": {
+        "keywords_used": 50,
+        "db_saved": 19,
+        "duplicates": 119,
+        "filtered": 175,
+        "by_source": {
+          "youtube": 456
+        },
+        "mode": "sync"
+      }
+    },
+    {
+      "stage": "download",
+      "success": true,
+      "count": 71,
+      "errors": 15,
+      "elapsed_sec": 239.30274367332458,
+      "details": {
+        "new_downloads": 71,
+        "skipped": 0,
+        "failed": 15,
+        "db_saved": 71
+      }
+    },
+    {
+      "stage": "detect",
+      "success": true,
+      "count": 498,
+      "errors": 0,
+      "elapsed_sec": 6254.478060007095,
+      "details": {
+        "total_episodes": 1012,
+        "new_episodes": 498,
+        "device": "auto",
+        "gpu_streams": true,
+        "batch_size": 4,
+        "vram_allocated_gb": 0.0,
+        "processed_by_gpu": 500,
+        "failed_by_gpu": 0
+      }
+    },
+    {
+      "stage": "build_il",
+      "success": true,
+      "count": 579,
+      "errors": 2,
+      "elapsed_sec": 5716.715114593506,
+      "details": {
+        "total_il_episodes": 1093,
+        "new_built": 579,
+        "previously_built": 514,
+        "failed": 2,
+        "fps": 5.0,
+        "gpu_streams": true,
+        "batch_size": 4,
+        "vram_gb": 0.0,
+        "peak_vram_gb": 0
+      }
+    },
+    {
+      "stage": "quality",
+      "success": true,
+      "count": 533,
+      "errors": 0,
+      "elapsed_sec": 7.090003967285156,
+      "details": {
+        "total_evaluated": 1093,
+        "passed": 533,
+        "rejected": 560,
+        "pass_rate": "48.8%",
+        "threshold": 60.0,
+        "grades": {
+          "A": 5,
+          "B": 225,
+          "C": 47,
+          "D": 256,
+          "F": 560
+        }
+      }
+    },
+    {
       "stage": "upload",
       "success": true,
-      "count": 454,
+      "count": 533,
       "errors": 0,
-      "elapsed_sec": 96.14317607879639,
+      "elapsed_sec": 148.20465898513794,
       "details": {
         "bucket": "p-ade-datasets",
         "prefix": "episodes"
       }
     }
   ],
-  "total_crawled": 0,
-  "total_downloaded": 0,
-  "total_episodes": 0,
-  "total_uploaded": 454,
-  "total_elapsed_sec": 96.14390897750854
+  "total_crawled": 456,
+  "total_downloaded": 71,
+  "total_episodes": 1012,
+  "total_il_episodes": 0,
+  "total_uploaded": 533,
+  "total_elapsed_sec": 12601.766510486603
 }

@@ -213,13 +213,13 @@ class TestQualityFilterIntegration:
     
     def test_filter_imports(self):
         """Filter 모듈 임포트"""
-        from filter_quality import QualityFilter, FilterResult
+        from scripts.pipeline.filter_quality import QualityFilter, FilterResult
         assert QualityFilter is not None
         assert FilterResult is not None
     
     def test_analyze_file(self, temp_poses_dir):
         """단일 파일 분석"""
-        from filter_quality import QualityFilter
+        from scripts.pipeline.filter_quality import QualityFilter
         
         qf = QualityFilter(poses_dir=str(temp_poses_dir))
         
@@ -232,7 +232,7 @@ class TestQualityFilterIntegration:
     
     def test_analyze_all(self, temp_poses_dir):
         """모든 파일 분석"""
-        from filter_quality import QualityFilter
+        from scripts.pipeline.filter_quality import QualityFilter
         
         qf = QualityFilter(poses_dir=str(temp_poses_dir))
         results = qf.analyze_all()
@@ -241,7 +241,7 @@ class TestQualityFilterIntegration:
     
     def test_filter_top_percent(self, temp_poses_dir, tmp_path):
         """상위 N% 필터링"""
-        from filter_quality import QualityFilter
+        from scripts.pipeline.filter_quality import QualityFilter
         
         filtered_dir = tmp_path / "filtered"
         qf = QualityFilter(
@@ -261,7 +261,7 @@ class TestQualityFilterIntegration:
     
     def test_generate_report(self, temp_poses_dir, tmp_path):
         """리포트 생성"""
-        from filter_quality import QualityFilter
+        from scripts.pipeline.filter_quality import QualityFilter
         
         qf = QualityFilter(poses_dir=str(temp_poses_dir))
         results = qf.analyze_all()

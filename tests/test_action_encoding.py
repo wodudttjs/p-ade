@@ -178,13 +178,13 @@ class TestActionEncoderIntegration:
     
     def test_encoder_imports(self):
         """Encoder 모듈 임포트"""
-        from encode_actions import ActionEncoder, EncodingResult
+        from scripts.pipeline.encode_actions import ActionEncoder, EncodingResult
         assert ActionEncoder is not None
         assert EncodingResult is not None
     
     def test_encode_single_file(self, temp_poses_dir, tmp_path):
         """단일 파일 인코딩"""
-        from encode_actions import ActionEncoder
+        from scripts.pipeline.encode_actions import ActionEncoder
         
         output_dir = tmp_path / "episodes"
         encoder = ActionEncoder(
@@ -203,7 +203,7 @@ class TestActionEncoderIntegration:
     
     def test_encode_all_files(self, temp_poses_dir, tmp_path):
         """모든 파일 인코딩"""
-        from encode_actions import ActionEncoder
+        from scripts.pipeline.encode_actions import ActionEncoder
         
         output_dir = tmp_path / "episodes"
         encoder = ActionEncoder(
@@ -222,7 +222,7 @@ class TestActionEncoderIntegration:
     
     def test_output_file_structure(self, temp_poses_dir, tmp_path):
         """출력 파일 구조 확인"""
-        from encode_actions import ActionEncoder
+        from scripts.pipeline.encode_actions import ActionEncoder
         
         output_dir = tmp_path / "episodes"
         encoder = ActionEncoder(
@@ -252,7 +252,7 @@ class TestActionEncoderIntegration:
     
     def test_velocity_calculation(self, temp_poses_dir, tmp_path):
         """속도 계산 검증"""
-        from encode_actions import ActionEncoder
+        from scripts.pipeline.encode_actions import ActionEncoder
         
         encoder = ActionEncoder(
             poses_dir=str(temp_poses_dir),

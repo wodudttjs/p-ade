@@ -1,17 +1,23 @@
 """
-Dashboard API 엔드포인트
+Dashboard API 엔드포인트 (Deprecated)
 
-UI 대시보드를 위한 REST API
-- GET /api/overview - KPI 및 건강 상태
-- GET /api/stages - 스테이지별 상태
-- GET /api/jobs - 작업 목록
-- GET /api/job/{job_key} - 작업 상세
-- GET /api/quality/weekly - 주간 품질 리포트
-- GET /api/versions - 데이터셋 버전
-- GET /api/cost - 비용 추적
+⚠️ 이 모듈은 dashboard/web_app.py로 통합되었습니다.
+   하위 호환성을 위해 FastAPI app을 유지하지만,
+   새로운 기능은 dashboard/web_app.py에 추가하세요.
+
+   실행: python dashboard/web_app.py --port 5000
+
+모든 API 엔드포인트:
+  - 파이프라인 모니터링: /api/overview, /api/stages, /api/stats
+  - 작업 관리: /api/jobs, /api/job/<key>
+  - 품질/비용: /api/quality/weekly, /api/cost
+  - 파이프라인 제어: /api/control/<action>, /api/control/status
+  - 로그 스트리밍: /api/stream/logs (SSE)
+  - 비디오/에피소드 CRUD: /api/videos, /api/episodes
+  - GPU/캐시/큐 모니터링: /api/gpu, /api/cache, /api/queue
 """
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -19,6 +25,7 @@ from datetime import datetime, timedelta
 from enum import Enum
 import random
 import math
+import asyncio
 
 app = FastAPI(
     title="P-ADE Dashboard API",
@@ -449,31 +456,367 @@ async def health_check():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 
+# ===== Pipeline Control (Task 2.4) =====
+
+@app.post("/api/control/{action}")
+async def control_pipeline(action: str):
+    """
+    파이프라인 제어: start, stop, restart
+    """
+    valid_actions = {"start", "stop", "restart", "pause", "resume"}
+    if action not in valid_actions:
+        raise HTTPException(status_code=400, detail=f"Invalid action: {action}. Valid: {valid_actions}")
+
+    r = _get_redis()
+    if not r:
+        raise HTTPException(status_code=503, detail="Redis 연결 실패")
+
+    try:
+        if action == "start":
+            r.set("pade:pipeline_status", "running")
+            r.publish("pade:control", "start")
+        elif action == "stop":
+            r.set("pade:pipeline_status", "stopped")
+            r.publish("pade:control", "stop")
+        elif action == "restart":
+            r.set("pade:pipeline_status", "restarting")
+            r.publish("pade:control", "restart")
+        elif action == "pause":
+            r.set("pade:pipeline_status", "paused")
+            r.publish("pade:control", "pause")
+        elif action == "resume":
+            r.set("pade:pipeline_status", "running")
+            r.publish("pade:control", "resume")
+
+        status = r.get("pade:pipeline_status") or "unknown"
+        return {"status": "ok", "action": action, "pipeline_status": status}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/control/status")
+async def get_pipeline_status():
+    """파이프라인 현재 상태"""
+    r = _get_redis()
+    if not r:
+        return {"pipeline_status": "unknown", "connected": False}
+
+    try:
+        status = r.get("pade:pipeline_status") or "idle"
+        return {"pipeline_status": status, "connected": True}
+    except Exception:
+        return {"pipeline_status": "unknown", "connected": False}
+
+
+@app.get("/api/stats")
+async def get_realtime_stats():
+    """
+    실시간 통계 (Task 2.4 — 대시보드용 통합 엔드포인트)
+    """
+    r = _get_redis()
+    if not r:
+        return {
+            "collected_today": 0,
+            "target": 1500,
+            "crawl_speed": 0,
+            "download_speed": 0,
+            "gpu_util": 0,
+            "queue_download": 0,
+            "queue_processing": 0,
+            "pipeline_status": "unknown",
+        }
+
+    try:
+        return {
+            "collected_today": int(r.get("pade:collected_today") or 0),
+            "target": int(r.get("pade:target") or 1500),
+            "crawl_speed": float(r.get("pade:crawl_speed") or 0),
+            "download_speed": float(r.get("pade:download_speed") or 0),
+            "gpu_util": float(r.get("pade:gpu_util") or 0),
+            "queue_download": int(r.llen("pade:download_queue") if r else 0),
+            "queue_processing": int(r.llen("pade:processing_queue") if r else 0),
+            "pipeline_status": r.get("pade:pipeline_status") or "idle",
+        }
+    except Exception:
+        return {
+            "collected_today": 0,
+            "target": 1500,
+            "crawl_speed": 0,
+            "download_speed": 0,
+            "gpu_util": 0,
+            "queue_download": 0,
+            "queue_processing": 0,
+            "pipeline_status": "unknown",
+        }
+
+
+# ===== WebSocket Log Streaming (Task 2.4) =====
+
+class ConnectionManager:
+    """WebSocket 연결 관리자"""
+
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: str):
+        disconnected = []
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except Exception:
+                disconnected.append(connection)
+        for conn in disconnected:
+            self.disconnect(conn)
+
+
+ws_manager = ConnectionManager()
+
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """
+    실시간 로그 스트리밍 (Redis Pub/Sub)
+    """
+    await ws_manager.connect(websocket)
+
+    r = _get_redis()
+    if not r:
+        await websocket.send_text("[ERROR] Redis 연결 실패")
+        ws_manager.disconnect(websocket)
+        return
+
+    try:
+        pubsub = r.pubsub()
+        pubsub.subscribe("pade:logs")
+
+        while True:
+            message = pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message and message["type"] == "message":
+                data = message["data"]
+                if isinstance(data, bytes):
+                    data = data.decode("utf-8", errors="replace")
+                await websocket.send_text(data)
+
+            # 클라이언트로부터 ping 메시지 확인
+            try:
+                # websocket.receive_text()를 non-blocking으로
+                incoming = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=0.05
+                )
+                if incoming == "ping":
+                    await websocket.send_text("pong")
+            except asyncio.TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                break
+
+            await asyncio.sleep(0.1)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_text(f"[ERROR] {str(e)}")
+        except Exception:
+            pass
+    finally:
+        ws_manager.disconnect(websocket)
+        try:
+            pubsub.unsubscribe("pade:logs")
+            pubsub.close()
+        except Exception:
+            pass
+
+
 # ===== Real Data Integration =====
+
+def _get_redis():
+    """Redis 연결 반환"""
+    try:
+        import redis
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        r.ping()
+        return r
+    except Exception:
+        return None
+
+
+@app.get("/api/pipeline/stats")
+async def get_pipeline_stats():
+    """
+    실시간 파이프라인 통계 (Redis 기반)
+    """
+    r = _get_redis()
+    if not r:
+        return {"connected": False, "error": "Redis 연결 실패"}
+
+    try:
+        crawl_stats = r.hgetall("pade:crawl_stats") or {}
+        quality_stats = r.hgetall("pade:quality_stats") or {}
+
+        return {
+            "connected": True,
+            "crawl": {
+                "total_completed": int(crawl_stats.get("total_completed", 0)),
+                "total_results": int(crawl_stats.get("total_results", 0)),
+                "total_failed": int(crawl_stats.get("total_failed", 0)),
+                "speed_per_min": float(r.get("pade:crawl_speed") or 0),
+            },
+            "download": {
+                "count": int(r.get("pade:download_count") or 0),
+                "speed_per_min": float(r.get("pade:download_speed") or 0),
+            },
+            "processing": {
+                "total_processed": int(r.hget("pade:processing_stats", "total_processed") or 0),
+                "speed_per_min": float(r.get("pade:process_speed") or 0),
+            },
+            "quality": {
+                "passed": int(quality_stats.get("passed", 0)),
+                "total": int(quality_stats.get("total", 0)),
+                "grades": {
+                    "A": int(quality_stats.get("grade_A", 0)),
+                    "B": int(quality_stats.get("grade_B", 0)),
+                    "C": int(quality_stats.get("grade_C", 0)),
+                    "D": int(quality_stats.get("grade_D", 0)),
+                    "F": int(quality_stats.get("grade_F", 0)),
+                },
+            },
+            "collected_today": int(r.get("pade:collected_today") or 0),
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@app.get("/api/pipeline/gpu")
+async def get_gpu_stats():
+    """
+    GPU 사용률 및 메모리 통계
+    """
+    r = _get_redis()
+    gpu_util = 0.0
+    gpu_memory = {"used": 0, "total": 0}
+
+    if r:
+        try:
+            gpu_util = float(r.get("pade:gpu_util") or 0)
+        except Exception:
+            pass
+
+    # 직접 nvidia-smi 호출 (Redis에 없는 경우)
+    try:
+        from monitor.stats_collector import StatsCollector
+        if gpu_util == 0:
+            gpu_util = StatsCollector.get_gpu_utilization()
+        gpu_memory = StatsCollector.get_gpu_memory()
+    except Exception:
+        pass
+
+    return {
+        "gpu_utilization_pct": gpu_util,
+        "memory_used_mb": gpu_memory.get("used", 0),
+        "memory_total_mb": gpu_memory.get("total", 0),
+        "memory_utilization_pct": round(
+            gpu_memory.get("used", 0) / max(gpu_memory.get("total", 1), 1) * 100, 1
+        ),
+    }
+
+
+@app.get("/api/pipeline/cache")
+async def get_cache_stats():
+    """
+    캐시 모니터링 통계
+    """
+    try:
+        from cache.redis_cache import get_monitor
+        monitor = get_monitor()
+        stats = monitor.get_realtime_stats()
+        history = monitor.get_history(limit=20)
+        return {"current": stats, "history": history}
+    except Exception as e:
+        return {"current": {"connected": False, "error": str(e)}, "history": []}
+
+
+@app.get("/api/pipeline/quality")
+async def get_quality_overview():
+    """
+    품질 평가 통계 개요
+    """
+    r = _get_redis()
+    if not r:
+        return {"connected": False}
+
+    try:
+        quality_stats = r.hgetall("pade:quality_stats") or {}
+        total = int(quality_stats.get("total", 0))
+        passed = int(quality_stats.get("passed", 0))
+
+        return {
+            "connected": True,
+            "total_evaluated": total,
+            "passed": passed,
+            "pass_rate": round(passed / max(total, 1) * 100, 1),
+            "grades": {
+                "A": int(quality_stats.get("grade_A", 0)),
+                "B": int(quality_stats.get("grade_B", 0)),
+                "C": int(quality_stats.get("grade_C", 0)),
+                "D": int(quality_stats.get("grade_D", 0)),
+                "F": int(quality_stats.get("grade_F", 0)),
+            },
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
+@app.get("/api/pipeline/workers")
+async def get_worker_status():
+    """
+    멀티프로세스 워커 상태
+    """
+    r = _get_redis()
+    if not r:
+        return {"connected": False}
+
+    try:
+        from task_queue.task_queue import CrawlTaskQueue
+        queue = CrawlTaskQueue()
+
+        return {
+            "connected": True,
+            "queue_length": queue.queue_length(),
+            "stats": queue.get_stats(),
+            "workers": queue.get_workers_status(),
+        }
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
 
 def get_real_overview_from_db(db_session, range_hours: int = 24):
     """
     실제 DB에서 Overview 데이터 조회
-    
-    TODO: DB 연동 시 구현
     """
     try:
         from models.database import Video, Episode, ProcessingJob
         from sqlalchemy import func
         
-        # 비디오 통계
         total_videos = db_session.query(func.count(Video.id)).scalar() or 0
         downloaded_videos = db_session.query(func.count(Video.id)).filter(
             Video.status == 'downloaded'
         ).scalar() or 0
         
-        # 에피소드 통계
         total_episodes = db_session.query(func.count(Episode.id)).scalar() or 0
         high_quality = db_session.query(func.count(Episode.id)).filter(
             Episode.quality_score >= 0.7
         ).scalar() or 0
         
-        # 작업 통계
         time_threshold = datetime.utcnow() - timedelta(hours=range_hours)
         jobs = db_session.query(ProcessingJob).filter(
             ProcessingJob.created_at >= time_threshold

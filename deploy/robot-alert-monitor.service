@@ -1,0 +1,37 @@
+# /etc/systemd/system/robot-alert-monitor.service
+#
+# P-ADE 알림 모니터링 서비스
+#
+# 설치:
+#   sudo cp deploy/robot-alert-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable robot-alert-monitor
+#   sudo systemctl start robot-alert-monitor
+
+[Unit]
+Description=P-ADE Alert Monitoring Service
+After=network.target redis.service robot-collector.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=robotuser
+Group=robotuser
+WorkingDirectory=/home/robotuser/p-ade
+
+Environment="PATH=/home/robotuser/p-ade/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+Environment="ENVIRONMENT=production"
+
+ExecStart=/home/robotuser/p-ade/.venv/bin/python main.py monitor-alerts --interval 300
+ExecStop=/bin/kill -SIGTERM $MAINPID
+
+Restart=always
+RestartSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=robot-alert-monitor
+
+[Install]
+WantedBy=multi-user.target

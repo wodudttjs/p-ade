@@ -135,10 +135,11 @@ def _update_episode_db(session, video: Video, output_path: Path, detector: Objec
 def _clear_all_queues(use_redis: bool):
     qm = QueueManager(use_redis=use_redis)
     qm.clear_all()
-    logger.info("🧹 큐 정리 완료")
+    logger.info("큐 정리 완료")
 
 
-def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps: float):
+def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps: float, device: str = None,
+        use_gpu_streams: bool = True):
     _clear_all_queues(use_redis=use_redis)
 
     session = _get_db_session(db_path)
@@ -148,38 +149,99 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
             logger.warning("로봇팔 영상이 없어 처리할 항목이 없습니다.")
             return 0
 
-        detector = ObjectDetector(device="cpu")
+        # Determine device: CLI arg > environment variable DETECT_DEVICE > CUDA if available > CPU
+        import os
+        try:
+            import torch
+            cuda_available = torch.cuda.is_available()
+        except Exception:
+            cuda_available = False
 
-        for idx, video in enumerate(videos, 1):
-            start_time = time.time()
-            logger.info(f"🔍 검출 시작 ({idx}/{len(videos)}): {video.video_id}")
+        env_device = os.environ.get('DETECT_DEVICE')
+        if device:
+            detector_device = device
+        elif env_device:
+            detector_device = env_device
+        else:
+            detector_device = 'cuda:0' if cuda_available else 'cpu'
 
+        logger.info(f"Using device for detection: {detector_device}")
+
+        # ── GPU 3-Stream 병렬 처리 시도 ──
+        gpu_batch_used = False
+        if use_gpu_streams:
             try:
-                detections = detector.detect_video(
-                    video_path=video.local_path,
-                    output_fps=output_fps,
-                    max_frames=None,
-                    visualize=False,
-                )
+                from gpu.stream_manager import GPU3StreamManager
+                stream_mgr = GPU3StreamManager()
+                batch_size = stream_mgr.auto_adjust_batch_size()
+                vram = stream_mgr.get_vram_usage()
+                logger.info(f"GPU 3-Stream 활성화 (배치: {batch_size}, VRAM: {vram.get('allocated', 0):.1f}GB)")
 
-                output_path = output_dir / f"{video.video_id}_episode.npz"
-                metadata = {
-                    "video_id": video.video_id,
-                    "source_path": video.local_path,
-                    "created_at": datetime.utcnow().isoformat(),
-                    "num_frames": len(detections),
-                    "output_fps": output_fps,
-                }
+                video_paths = [v.local_path for v in videos if v.local_path and Path(v.local_path).exists()]
+                existing = {p.stem.replace("_episode", "") for p in output_dir.glob("*.npz")} if output_dir.exists() else set()
+                pending = [p for p in video_paths if Path(p).stem not in existing]
 
-                _save_episode_npz(output_path, detections, metadata)
-                _update_episode_db(session, video, output_path, detector)
-                session.commit()
+                if pending:
+                    detect_processor = stream_mgr.make_detect_processor(
+                        output_fps=output_fps, device=detector_device,
+                    )
+                    results = stream_mgr.process_batch(pending, detect_processor)
+                    output_dir.mkdir(parents=True, exist_ok=True)
 
-                elapsed = time.time() - start_time
-                logger.info(f"✅ 검출 완료: {video.video_id} ({elapsed:.2f}s)")
+                    for r in results:
+                        if r.get("success") and r.get("detections"):
+                            out_path = output_dir / f"{r['video_id']}_episode.npz"
+                            metadata = {
+                                "video_id": r["video_id"],
+                                "source_path": r["video_path"],
+                                "created_at": datetime.utcnow().isoformat(),
+                                "num_frames": r["frames"],
+                                "output_fps": output_fps,
+                            }
+                            _save_episode_npz(out_path, r["detections"], metadata)
+                            logger.info(f"검출 완료: {r['video_id']}")
+                        else:
+                            logger.warning(f"검출 실패: {r.get('video_id', '?')}: {r.get('error', '')}")
+
+                    stream_mgr.print_stats()
+                    gpu_batch_used = True
             except Exception as e:
-                elapsed = time.time() - start_time
-                logger.error(f"❌ 검출 실패: {video.video_id} ({elapsed:.2f}s) - {e}")
+                logger.warning(f"GPU 3-Stream 검출 실패, 순차 모드로 폴백: {e}")
+
+        # ── 폴백: 순차 처리 ──
+        if not gpu_batch_used:
+            detector = ObjectDetector(device=detector_device)
+
+            for idx, video in enumerate(videos, 1):
+                start_time = time.time()
+                logger.info(f"검출 시작 ({idx}/{len(videos)}): {video.video_id}")
+
+                try:
+                    detections = detector.detect_video(
+                        video_path=video.local_path,
+                        output_fps=output_fps,
+                        max_frames=None,
+                        visualize=False,
+                    )
+
+                    output_path = output_dir / f"{video.video_id}_episode.npz"
+                    metadata = {
+                        "video_id": video.video_id,
+                        "source_path": video.local_path,
+                        "created_at": datetime.utcnow().isoformat(),
+                        "num_frames": len(detections),
+                        "output_fps": output_fps,
+                    }
+
+                    _save_episode_npz(output_path, detections, metadata)
+                    _update_episode_db(session, video, output_path, detector)
+                    session.commit()
+
+                    elapsed = time.time() - start_time
+                    logger.info(f"검출 완료: {video.video_id} ({elapsed:.2f}s)")
+                except Exception as e:
+                    elapsed = time.time() - start_time
+                    logger.error(f"검출 실패: {video.video_id} ({elapsed:.2f}s) - {e}")
 
     finally:
         session.close()
@@ -194,6 +256,8 @@ def main():
     parser.add_argument("--limit", type=int, default=10, help="처리할 영상 수")
     parser.add_argument("--redis", action="store_true", help="Redis 큐 사용")
     parser.add_argument("--output-fps", type=float, default=5.0, help="검출 FPS (기본 5)")
+    parser.add_argument("--device", default=None, help="모델 실행 디바이스 (예: 'cuda:0' 또는 'cpu')")
+    parser.add_argument("--no-gpu-streams", action="store_true", help="GPU 3-Stream 비활성화")
     args = parser.parse_args()
 
     db_path = Path(args.db)
@@ -205,6 +269,8 @@ def main():
         limit=args.limit,
         use_redis=args.redis,
         output_fps=args.output_fps,
+        device=args.device,
+        use_gpu_streams=not args.no_gpu_streams,
     )
 
 

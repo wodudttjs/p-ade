@@ -83,10 +83,10 @@ class Sidebar(QFrame):
         # 네비게이션 버튼
         self.buttons = []
         nav_items = [
-            ("📊", "Overview"),
-            ("📋", "Jobs"),
-            ("📈", "Quality"),
-            ("⚙️", "Settings"),
+            ("📊", "개요"),
+            ("📋", "작업"),
+            ("📈", "품질"),
+            ("⚙️", "설정"),
         ]
         
         for icon, text in nav_items:
@@ -189,11 +189,11 @@ class DashboardApp(QMainWindow):
         control_layout.setContentsMargins(20, 10, 20, 10)
         
         # Start/Stop 버튼 그룹
-        btn_group = QGroupBox("Pipeline Control")
+        btn_group = QGroupBox("파이프라인 제어")
         btn_group.setFixedWidth(200)
         btn_layout = QVBoxLayout(btn_group)
         
-        self.btn_start = QPushButton("▶ Start Collection")
+        self.btn_start = QPushButton("▶ 수집 시작")
         self.btn_start.setFixedHeight(36)
         self.btn_start.setStyleSheet(f"""
             QPushButton {{
@@ -207,7 +207,7 @@ class DashboardApp(QMainWindow):
         """)
         btn_layout.addWidget(self.btn_start)
         
-        self.btn_stop = QPushButton("■ Stop")
+        self.btn_stop = QPushButton("■ 중지")
         self.btn_stop.setFixedHeight(36)
         self.btn_stop.setEnabled(False)
         self.btn_stop.setStyleSheet(f"""
@@ -224,7 +224,7 @@ class DashboardApp(QMainWindow):
         
         # 검색어 입력
         query_layout = QHBoxLayout()
-        query_label = QLabel("Query:")
+        query_label = QLabel("검색어:")
         query_label.setStyleSheet("font-size: 11px;")
         query_layout.addWidget(query_label)
         
@@ -247,7 +247,7 @@ class DashboardApp(QMainWindow):
         # 수집 설정 (Videos, Workers)
         settings_layout = QHBoxLayout()
         
-        count_label = QLabel("Videos:")
+        count_label = QLabel("비디오 수:")
         count_label.setStyleSheet("font-size: 11px;")
         settings_layout.addWidget(count_label)
         
@@ -257,7 +257,7 @@ class DashboardApp(QMainWindow):
         self.video_count_spin.setFixedWidth(50)
         settings_layout.addWidget(self.video_count_spin)
         
-        workers_label = QLabel("Workers:")
+        workers_label = QLabel("작업자 수:")
         workers_label.setStyleSheet("font-size: 11px;")
         settings_layout.addWidget(workers_label)
         
@@ -272,17 +272,18 @@ class DashboardApp(QMainWindow):
         control_layout.addWidget(btn_group)
         
         # 진행 상황 표시
-        progress_group = QGroupBox("Pipeline Progress")
+        progress_group = QGroupBox("파이프라인 진행률")
         progress_layout = QVBoxLayout(progress_group)
         
         # 각 단계별 프로그레스 바
         self.progress_bars = {}
         stages = [
-            ("download", "📥 Download", Colors.ACCENT_BLUE),
-            ("extract", "🔍 Extract", Colors.ACCENT_PURPLE),
-            ("filter", "✨ Filter", Colors.ACCENT_GREEN),
-            ("encode", "🔧 Encode", Colors.ACCENT_YELLOW),
-            ("upload", "☁️ Upload", Colors.ACCENT_BLUE),
+            ("download", "📥 다운로드", Colors.ACCENT_BLUE),
+            ("detect", "🔍 검출", Colors.ACCENT_PURPLE),
+            ("extract", "🏃 포즈추출", Colors.ACCENT_GREEN),
+            ("filter", "✨ 필터링", Colors.ACCENT_YELLOW),
+            ("encode", "🔧 인코딩", Colors.ACCENT_BLUE),
+            ("upload", "☁️ 업로드", Colors.ACCENT_BLUE),
         ]
         
         progress_grid = QHBoxLayout()
@@ -322,7 +323,7 @@ class DashboardApp(QMainWindow):
         
         # 전체 진행률
         total_layout = QHBoxLayout()
-        total_label = QLabel("Total Progress:")
+        total_label = QLabel("전체 진행률:")
         total_label.setStyleSheet("font-weight: 600;")
         total_layout.addWidget(total_label)
         
@@ -344,7 +345,7 @@ class DashboardApp(QMainWindow):
         """)
         total_layout.addWidget(self.total_progress)
         
-        self.progress_status = QLabel("Ready")
+        self.progress_status = QLabel("대기 중")
         self.progress_status.setFixedWidth(150)
         self.progress_status.setStyleSheet(f"color: {Colors.TEXT_MUTED};")
         total_layout.addWidget(self.progress_status)
@@ -354,16 +355,16 @@ class DashboardApp(QMainWindow):
         control_layout.addWidget(progress_group, 1)
         
         # DB 통계 요약
-        db_group = QGroupBox("Database Stats")
+        db_group = QGroupBox("DB 통계 요약")
         db_group.setFixedWidth(200)
         db_layout = QVBoxLayout(db_group)
         
         self.db_stats_labels = {}
         db_items = [
-            ("videos", "📹 Collected:"),
-            ("episodes", "🎬 Episodes:"),
-            ("jobs", "📋 Jobs:"),
-            ("storage", "💾 Storage:"),
+            ("videos", "📹 수집됨:"),
+            ("episodes", "🎬 에피소드:"),
+            ("jobs", "📋 작업:"),
+            ("storage", "💾 저장소:"),
             ("db", "🗄️ DB:"),
             ("s3", "☁️ S3:"),
         ]
@@ -392,7 +393,7 @@ class DashboardApp(QMainWindow):
         toolbar_layout = QHBoxLayout(toolbar)
         toolbar_layout.setContentsMargins(20, 0, 20, 0)
         
-        self.page_title = QLabel("Overview")
+        self.page_title = QLabel("개요")
         self.page_title.setStyleSheet("font-size: 18px; font-weight: 700;")
         toolbar_layout.addWidget(self.page_title)
         
@@ -414,6 +415,14 @@ class DashboardApp(QMainWindow):
         self.btn_theme.setFixedSize(36, 36)
         self.btn_theme.setToolTip("Toggle Theme")
         toolbar_layout.addWidget(self.btn_theme)
+        
+        # 실시간 시계
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet(f"color: {Colors.TEXT_MUTED}; font-size: 16px;")
+        toolbar_layout.addWidget(self.clock_label)
+        self._clock_timer = QTimer(self)
+        self._clock_timer.timeout.connect(self._update_clock)
+        self._clock_timer.start(1000)
         
         content_layout.addWidget(toolbar)
         
@@ -502,8 +511,12 @@ class DashboardApp(QMainWindow):
                 video_count = self.video_count_spin.value()
                 workers = self.workers_spin.value()
                 
+                # mass_collector.py 를 사용하여 GPU 3-Stream 파이프라인 실행
+                # 단계: download → detect → build_il → quality → upload
+                
                 # 1. Download 단계
                 self._worker_signals.progress.emit("download", 0, 100)
+                self._worker_signals.log.emit("📥 다운로드 단계 시작 (GPU 3-Stream 파이프라인)")
                 self._run_stage_script("parallel_download.py", [
                     "--query", query,
                     "--workers", str(workers),
@@ -514,32 +527,48 @@ class DashboardApp(QMainWindow):
                 if not self._is_collecting:
                     return
                 
-                # 2. Extract 단계
+                # 2. Detect 단계 (GPU 3-Stream 자동 적용)
+                self._worker_signals.progress.emit("detect", 0, 100)
+                self._worker_signals.log.emit("🔍 객체 검출 단계 (GPU 3-Stream 병렬 처리)")
+                self._run_stage_script("mass_collector.py", [
+                    "--target", str(video_count),
+                    "--stage", "detect",
+                ])
+                self._worker_signals.progress.emit("detect", 100, 100)
+                
+                if not self._is_collecting:
+                    return
+                
+                # 3. Extract 단계 (GPU 3-Stream 자동 적용)
                 self._worker_signals.progress.emit("extract", 0, 100)
+                self._worker_signals.log.emit("🏃 포즈 추출 단계 (GPU 3-Stream 병렬 처리)")
                 self._run_stage_script("extract_poses.py", ["--all"])
                 self._worker_signals.progress.emit("extract", 100, 100)
                 
                 if not self._is_collecting:
                     return
                 
-                # 3. Filter 단계
+                # 4. Filter 단계 (GPU 3-Stream 자동 적용)
                 self._worker_signals.progress.emit("filter", 0, 100)
+                self._worker_signals.log.emit("✨ 품질 필터링 (GPU 3-Stream 병렬 처리)")
                 self._run_stage_script("filter_quality.py", ["--all", "--update-db"])
                 self._worker_signals.progress.emit("filter", 100, 100)
                 
                 if not self._is_collecting:
                     return
                 
-                # 4. Encode 단계
+                # 5. Encode 단계 (GPU 3-Stream 자동 적용)
                 self._worker_signals.progress.emit("encode", 0, 100)
+                self._worker_signals.log.emit("🔧 액션 인코딩 (GPU 3-Stream 병렬 처리)")
                 self._run_stage_script("encode_actions.py", ["--all"])
                 self._worker_signals.progress.emit("encode", 100, 100)
                 
                 if not self._is_collecting:
                     return
                 
-                # 5. Upload 단계 (클라우드)
+                # 6. Upload 단계
                 self._worker_signals.progress.emit("upload", 0, 100)
+                self._worker_signals.log.emit("☁️ S3 업로드")
                 self._run_stage_script("upload_to_s3.py", ["--all"])
                 self._worker_signals.progress.emit("upload", 100, 100)
                 
@@ -673,13 +702,15 @@ class DashboardApp(QMainWindow):
         # 각 단계 파일 수 확인
         try:
             raw_count = len(list((data_dir / "raw").glob("*.mp4"))) if (data_dir / "raw").exists() else 0
+            episodes_detect = len(list((data_dir / "episodes").glob("*.npz"))) if (data_dir / "episodes").exists() else 0
             poses_count = len(list((data_dir / "poses").glob("*.npz"))) if (data_dir / "poses").exists() else 0
             filtered_count = len(list((data_dir / "filtered").glob("*.npz"))) if (data_dir / "filtered").exists() else 0
-            episodes_count = len(list((data_dir / "episodes").glob("*.npz"))) if (data_dir / "episodes").exists() else 0
+            episodes_count = len(list((data_dir / "episodes").glob("*_episode.npz"))) if (data_dir / "episodes").exists() else 0
             
             # 진행률 계산 (이전 단계 대비)
             if raw_count > 0:
                 self.progress_bars["download"].setValue(100)
+                self.progress_bars["detect"].setValue(min(100, int(episodes_detect * 100 / raw_count)))
                 self.progress_bars["extract"].setValue(min(100, int(poses_count * 100 / raw_count)))
             
             if poses_count > 0:
@@ -698,13 +729,9 @@ class DashboardApp(QMainWindow):
     def _switch_page(self, index: int):
         """페이지 전환"""
         self.stack.setCurrentIndex(index)
-        
-        # 버튼 체크 상태 업데이트
         for i, btn in enumerate(self.sidebar.buttons):
             btn.setChecked(i == index)
-        
-        # 페이지 타이틀 업데이트
-        titles = ["Overview", "Jobs", "Quality", "Settings"]
+        titles = ["개요", "작업", "품질", "설정"]
         self.page_title.setText(titles[index])
     
     def _on_refresh(self):
@@ -749,6 +776,10 @@ class DashboardApp(QMainWindow):
             self.statusBar().showMessage(f"Auto-refresh enabled: {text}")
         else:
             self.statusBar().showMessage("Auto-refresh disabled")
+    
+    def _update_clock(self):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.clock_label.setText(f"🕒 {now}")
 
 
 def run_dashboard():
