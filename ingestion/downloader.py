@@ -21,6 +21,7 @@ from core.logging_config import logger
 class VideoQuality(Enum):
     """비디오 품질 설정"""
     LOW = "360p"
+    STANDARD = "480p"   # 대량 수집 기본값 (용량 절약)
     MEDIUM = "720p"
     HIGH = "1080p"
     ULTRA = "1440p"
@@ -46,16 +47,21 @@ class VideoDownloader:
     # 품질별 포맷 코드
     QUALITY_FORMATS = {
         VideoQuality.LOW: "best[height<=360][ext=mp4]/best[height<=360]",
+        VideoQuality.STANDARD: "best[height<=480][ext=mp4]/best[height<=480]",
         VideoQuality.MEDIUM: "best[height<=720][ext=mp4]/best[height<=720]",
         VideoQuality.HIGH: "best[height<=1080][ext=mp4]/best[height<=1080]",
         VideoQuality.ULTRA: "best[height<=1440][ext=mp4]/best[height<=1440]",
     }
-    
+
+    # 영상당 대역폭 제한 (bytes/sec). 0 = 제한 없음
+    RATE_LIMIT_BYTES = 5 * 1024 * 1024  # 5MB/s
+
     def __init__(
         self,
         output_dir: Path,
-        preferred_quality: VideoQuality = VideoQuality.HIGH,
+        preferred_quality: VideoQuality = VideoQuality.STANDARD,
         max_retries: int = 3,
+        rate_limit_bytes: int = RATE_LIMIT_BYTES,
     ):
         """
         Args:
@@ -65,10 +71,11 @@ class VideoDownloader:
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.preferred_quality = preferred_quality
         self.max_retries = max_retries
-        
+        self.rate_limit_bytes = rate_limit_bytes
+
         # 기본 yt-dlp 옵션
         self.base_opts = {
             'outtmpl': str(self.output_dir / '%(id)s.%(ext)s'),
@@ -81,6 +88,7 @@ class VideoDownloader:
             'keepvideo': False,
             'nocheckcertificate': True,
             'prefer_ffmpeg': True,
+            'ratelimit': rate_limit_bytes if rate_limit_bytes > 0 else None,
         }
     
     def download(
@@ -435,7 +443,7 @@ def run_cli():
     parser = argparse.ArgumentParser(description="비디오 다운로드 (CSV 입력)")
     parser.add_argument("--input", required=True, help="CSV 파일 경로")
     parser.add_argument("--output", default="data/raw", help="다운로드 출력 디렉토리")
-    parser.add_argument("--quality", default="1080p", choices=["360p", "720p", "1080p", "1440p"], help="다운로드 품질")
+    parser.add_argument("--quality", default="480p", choices=["360p", "480p", "720p", "1080p", "1440p"], help="다운로드 품질 (기본: 480p)")
     parser.add_argument("--db", default="data/pade.db", help="SQLite DB 경로")
     parser.add_argument("--max-downloads", type=int, default=10, help="다운로드 최대 개수")
     args = parser.parse_args()
@@ -448,6 +456,7 @@ def run_cli():
     output_dir = Path(args.output)
     quality_map = {
         "360p": VideoQuality.LOW,
+        "480p": VideoQuality.STANDARD,
         "720p": VideoQuality.MEDIUM,
         "1080p": VideoQuality.HIGH,
         "1440p": VideoQuality.ULTRA,

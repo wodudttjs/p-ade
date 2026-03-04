@@ -167,9 +167,41 @@ def run(db_path: Path, output_dir: Path, limit: int, use_redis: bool, output_fps
 
         logger.info(f"Using device for detection: {detector_device}")
 
+        # ── 1-Pass 통합 처리 (UnifiedVideoProcessor) 시도 ──
+        unified_used = False
+        if use_gpu_streams:
+            try:
+                from gpu.unified_processor import UnifiedVideoProcessor
+                processor = UnifiedVideoProcessor(output_fps=output_fps, device=detector_device)
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                existing = {p.stem.replace("_episode", "") for p in output_dir.glob("*.npz")} if output_dir.exists() else set()
+                pending_videos = [v for v in videos if v.video_id not in existing and v.local_path and Path(v.local_path).exists()]
+
+                if pending_videos:
+                    logger.info(f"UnifiedVideoProcessor 1-Pass 처리: {len(pending_videos)}개 영상")
+                    for idx, video in enumerate(pending_videos, 1):
+                        start_time = time.time()
+                        try:
+                            out_path = output_dir / f"{video.video_id}_episode.npz"
+                            processor.process(video.local_path, str(out_path))
+                            _update_episode_db(session, video, out_path, ObjectDetector(device=detector_device))
+                            session.commit()
+                            elapsed = time.time() - start_time
+                            logger.info(f"통합 처리 완료 ({idx}/{len(pending_videos)}): {video.video_id} ({elapsed:.2f}s)")
+                        except Exception as e:
+                            elapsed = time.time() - start_time
+                            logger.error(f"통합 처리 실패: {video.video_id} ({elapsed:.2f}s) - {e}")
+
+                unified_used = True
+            except ImportError:
+                logger.info("UnifiedVideoProcessor 미사용, GPU 3-Stream으로 폴백")
+            except Exception as e:
+                logger.warning(f"UnifiedVideoProcessor 실패, GPU 3-Stream으로 폴백: {e}")
+
         # ── GPU 3-Stream 병렬 처리 시도 ──
         gpu_batch_used = False
-        if use_gpu_streams:
+        if use_gpu_streams and not unified_used:
             try:
                 from gpu.stream_manager import GPU3StreamManager
                 stream_mgr = GPU3StreamManager()

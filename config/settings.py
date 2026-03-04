@@ -41,16 +41,31 @@ class Config:
     GCS_BUCKET: str = os.getenv("GCS_BUCKET", "p-ade-datasets")
     
     # 데이터베이스 설정
-    DB_HOST: str = os.getenv("DB_HOST", "localhost")
-    DB_PORT: int = int(os.getenv("DB_PORT", "5432"))
-    DB_NAME: str = os.getenv("DB_NAME", "pade_db")
-    DB_USER: str = os.getenv("DB_USER", "pade_user")
-    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
-    
+    POSTGRES_HOST: str = os.getenv("POSTGRES_HOST", "localhost")
+    POSTGRES_PORT: int = int(os.getenv("POSTGRES_PORT", "5432"))
+    POSTGRES_DB: str = os.getenv("POSTGRES_DB", "pade")
+    POSTGRES_USER: str = os.getenv("POSTGRES_USER", "pade")
+    POSTGRES_PASSWORD: str = os.getenv("POSTGRES_PASSWORD", "pade")
+
+    # 하위 호환성 별칭
+    @property
+    def DB_HOST(self) -> str: return self.POSTGRES_HOST
+    @property
+    def DB_PORT(self) -> int: return self.POSTGRES_PORT
+    @property
+    def DB_NAME(self) -> str: return self.POSTGRES_DB
+    @property
+    def DB_USER(self) -> str: return self.POSTGRES_USER
+    @property
+    def DB_PASSWORD(self) -> str: return self.POSTGRES_PASSWORD
+
     @property
     def DATABASE_URL(self) -> str:
         """SQLAlchemy 데이터베이스 URL"""
-        return f"postgresql://{self.DB_USER}:{self.DB_PASSWORD}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+        return (
+            f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
     
     # Redis 설정
     REDIS_HOST: str = os.getenv("REDIS_HOST", "localhost")

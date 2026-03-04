@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QTableView, QGroupBox, QTextEdit,
     QSplitter, QGridLayout, QScrollArea, QFrame, QTabWidget,
-    QHeaderView
+    QHeaderView, QProgressBar, QTableWidget, QTableWidgetItem
 )
 
 from dashboard.models import (
@@ -60,6 +60,23 @@ class OverviewPage(QWidget):
         # 헤더
         header = SectionHeader("개요", "파이프라인 전체 현황")
         content_layout.addWidget(header)
+        
+        # ── 파이프라인 진행률 바 (5K 스케일) ──
+        progress_group = QGroupBox("파이프라인 진행률")
+        progress_layout = QVBoxLayout(progress_group)
+        
+        self.pipeline_progress_bar = QProgressBar()
+        self.pipeline_progress_bar.setRange(0, 5000)
+        self.pipeline_progress_bar.setValue(0)
+        self.pipeline_progress_bar.setFormat("%v / 5,000 (%p%)")
+        self.pipeline_progress_bar.setMinimumHeight(28)
+        progress_layout.addWidget(self.pipeline_progress_bar)
+        
+        self.pipeline_stage_label = QLabel("대기 중")
+        self.pipeline_stage_label.setStyleSheet(f"color: {Colors.TEXT_SECONDARY}; font-size: 13px;")
+        progress_layout.addWidget(self.pipeline_stage_label)
+        
+        content_layout.addWidget(progress_group)
         
         # KPI 그리드
         kpi_grid = QGridLayout()
@@ -572,3 +589,117 @@ class SettingsPage(QWidget):
         layout.addWidget(alert_box)
         
         layout.addStretch()
+
+
+# ============================================================
+# Runs 페이지 (D-2: 크로스-런 모니터링)
+# ============================================================
+
+class RunsPage(QWidget):
+    """파이프라인 실행 이력 페이지"""
+    
+    def __init__(self, data_service: Optional['DataService'] = None, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._data_service = data_service
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        
+        header = SectionHeader("실행 이력", "파이프라인 실행 기록")
+        layout.addWidget(header)
+        
+        # 실행 이력 테이블
+        self.runs_table = QTableWidget()
+        self.runs_table.setColumnCount(8)
+        self.runs_table.setHorizontalHeaderLabels([
+            "Run ID", "시작", "완료", "목표", "크롤링", "처리", "통과", "상태"
+        ])
+        self.runs_table.horizontalHeader().setStretchLastSection(True)
+        self.runs_table.setAlternatingRowColors(True)
+        self.runs_table.setSelectionBehavior(QTableWidget.SelectRows)
+        layout.addWidget(self.runs_table)
+        
+        # 새로고침 버튼
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        refresh_btn = QPushButton("새로고침")
+        refresh_btn.clicked.connect(self.refresh)
+        btn_layout.addWidget(refresh_btn)
+        layout.addLayout(btn_layout)
+    
+    def refresh(self):
+        """실행 이력 로드 (API /api/runs 호출)"""
+        try:
+            import urllib.request
+            import json
+            resp = urllib.request.urlopen("http://localhost:5000/api/runs?per_page=50")
+            data = json.loads(resp.read().decode())
+            runs = data.get("items", [])
+            
+            self.runs_table.setRowCount(len(runs))
+            for i, run in enumerate(runs):
+                self.runs_table.setItem(i, 0, QTableWidgetItem(str(run.get("run_id", ""))))
+                self.runs_table.setItem(i, 1, QTableWidgetItem(str(run.get("started_at", ""))))
+                self.runs_table.setItem(i, 2, QTableWidgetItem(str(run.get("completed_at", ""))))
+                self.runs_table.setItem(i, 3, QTableWidgetItem(str(run.get("target_count", ""))))
+                self.runs_table.setItem(i, 4, QTableWidgetItem(str(run.get("crawled", ""))))
+                self.runs_table.setItem(i, 5, QTableWidgetItem(str(run.get("processed", ""))))
+                self.runs_table.setItem(i, 6, QTableWidgetItem(str(run.get("passed", ""))))
+                self.runs_table.setItem(i, 7, QTableWidgetItem(str(run.get("status", ""))))
+        except Exception:
+            pass
+
+
+# ============================================================
+# Dedup 위젯 (D-2: 중복 방지 통계)
+# ============================================================
+
+class DedupStatsWidget(QWidget):
+    """중복 방지 통계 위젯"""
+    
+    def __init__(self, parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        
+        header = SectionHeader("중복 방지 통계", "cross-run 중복 방지 현황")
+        layout.addWidget(header)
+        
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        
+        self.dedup_cards = {}
+        items = [
+            ("total_collected", "총 수집", Colors.ACCENT_BLUE),
+            ("unique_videos", "고유 영상", Colors.ACCENT_GREEN),
+            ("duplicate_blocked", "중복 차단", Colors.WARNING),
+            ("duplicate_rate", "중복률 (%)", Colors.DANGER if hasattr(Colors, 'DANGER') else Colors.WARNING),
+        ]
+        
+        for i, (key, title, color) in enumerate(items):
+            card = KPICard(title, "—", color=color)
+            grid.addWidget(card, 0, i)
+            self.dedup_cards[key] = card
+        
+        layout.addLayout(grid)
+    
+    def refresh(self):
+        """중복 방지 통계 로드 (API /api/dedup/stats 호출)"""
+        try:
+            import urllib.request
+            import json
+            resp = urllib.request.urlopen("http://localhost:5000/api/dedup/stats")
+            data = json.loads(resp.read().decode())
+            
+            self.dedup_cards["total_collected"].setValue(str(data.get("total_collected", 0)))
+            self.dedup_cards["unique_videos"].setValue(str(data.get("unique_videos", 0)))
+            self.dedup_cards["duplicate_blocked"].setValue(str(data.get("duplicate_blocked", 0)))
+            rate = data.get("duplicate_rate", 0)
+            self.dedup_cards["duplicate_rate"].setValue(f"{rate:.1f}%")
+        except Exception:
+            pass

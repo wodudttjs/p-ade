@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import signal
+import uuid
 import argparse
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -60,7 +61,7 @@ class CollectionPipeline:
 
     def __init__(
         self,
-        target_count: int = 500,
+        target_count: int = 5000,
         stage: Optional[str] = None,
         start_stage: Optional[str] = None,
         end_stage: Optional[str] = None,
@@ -82,8 +83,12 @@ class CollectionPipeline:
         """PipelineConfig 생성"""
         from mass_collector import PipelineConfig
 
+        # run_id 자동 생성
+        run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
         cfg_kwargs = {
             "target_count": self.target_count,
+            "run_id": run_id,
         }
         # extra_config에서 PipelineConfig 필드만 추출
         import dataclasses
@@ -277,7 +282,7 @@ def wait_until_tomorrow(hour: int = 6):
 
 
 def run_forever(
-    target_count: int = 500,
+    target_count: int = 5000,
     interval: int = 60,
     error_wait: int = 300,
     resume_hour: int = 6,
@@ -365,7 +370,7 @@ def run_alert_monitor(check_interval: int = 300):
 # ============================================================
 
 def run_serve(
-    target_count: int = 500,
+    target_count: int = 5000,
     interval: int = 120,
     error_wait: int = 300,
     port: int = 5000,
@@ -501,7 +506,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # serve (기본 모드 — 대시보드 + 파이프라인 자동)
     p_serve = subparsers.add_parser("serve", help="서버 모드 (대시보드 + 자동 파이프라인)")
-    p_serve.add_argument("--target", type=int, default=500, help="일일 수집 목표")
+    p_serve.add_argument("--target", type=int, default=5000, help="일일 수집 목표")
     p_serve.add_argument("--interval", type=int, default=120, help="파이프라인 반복 간격(초)")
     p_serve.add_argument("--error-wait", type=int, default=300, help="에러 시 대기(초)")
     p_serve.add_argument("--port", type=int, default=5000, help="대시보드 포트")
@@ -509,14 +514,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # run-once
     p_once = subparsers.add_parser("run-once", help="파이프라인 1회 실행")
-    p_once.add_argument("--target", type=int, default=500)
+    p_once.add_argument("--target", type=int, default=5000)
     p_once.add_argument("--stage", help="단일 단계")
     p_once.add_argument("--start-stage", help="시작 단계")
     p_once.add_argument("--end-stage", help="종료 단계")
 
     # run-forever
     p_forever = subparsers.add_parser("run-forever", help="무한 루프 모드 (CLI만)")
-    p_forever.add_argument("--target", type=int, default=500)
+    p_forever.add_argument("--target", type=int, default=5000)
     p_forever.add_argument("--interval", type=int, default=60, help="반복 간 대기(초)")
     p_forever.add_argument("--error-wait", type=int, default=300, help="에러 시 대기(초)")
     p_forever.add_argument("--resume-hour", type=int, default=6, help="재개 시각 (0-23)")
@@ -538,7 +543,7 @@ def main():
     if args.command == "serve" or args.command is None:
         # 기본 모드: 서버 (대시보드 + 파이프라인 자동 실행)
         run_serve(
-            target_count=getattr(args, "target", 500),
+            target_count=getattr(args, "target", 5000),
             interval=getattr(args, "interval", 120),
             error_wait=getattr(args, "error_wait", 300),
             port=getattr(args, "port", 5000),
@@ -561,7 +566,7 @@ def main():
 
     elif args.command == "run-once":
         pipeline = CollectionPipeline(
-            target_count=getattr(args, "target", 500),
+            target_count=getattr(args, "target", 5000),
             stage=getattr(args, "stage", None),
             start_stage=getattr(args, "start_stage", None),
             end_stage=getattr(args, "end_stage", None),

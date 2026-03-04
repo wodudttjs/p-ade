@@ -1,14 +1,15 @@
 """
-P-ADE 로봇 영상 수집 파이프라인 Airflow DAG
+P-ADE 로봇 영상 수집 파이프라인 Airflow DAG (v2 - 5000 목표)
 
 매일 자동으로 로봇팔 영상을 수집하고 처리하는 파이프라인입니다.
 
 파이프라인 단계:
   1. crawl_videos: 키워드로 영상 URL 수집
   2. download_videos: 영상 다운로드 (yt-dlp)
-  3. detect_objects: 객체 검출 및 포즈 추출
-  4. build_imitation_data: 모방학습 데이터 생성
+  3. process_videos: 객체 검출 + 포즈 추출 + 에피소드 생성
+  4. quality_check: 품질 평가 및 필터링
   5. upload_s3: S3에 업로드
+  6. cleanup: 로컬 RAW 파일 정리
 
 사용법:
   # Airflow 설치 후 DAG 디렉토리에 복사
@@ -54,7 +55,7 @@ def crawl_videos(**context):
     """
     from mass_collector import MassCollector, PipelineConfig
     
-    target_count = context.get("params", {}).get("target_count", 100)
+    target_count = context.get("params", {}).get("target_count", 5000)
     
     config = PipelineConfig(
         target_count=target_count,
@@ -87,42 +88,34 @@ def download_videos(**context):
     return {"stage": "download"}
 
 
-def detect_objects(**context):
+def process_videos(**context):
     """
-    Task 3: 객체 검출 및 에피소드 생성
+    Task 3: GPU 처리 (객체 검출 + 포즈 추출 + 에피소드 생성)
     
-    YOLO로 객체를 검출하고 에피소드 NPZ 파일을 생성합니다.
+    YOLO 객체 검출, MediaPipe 포즈 추출, 에피소드 NPZ 파일 생성을 통합 처리합니다.
     """
     from mass_collector import MassCollector, PipelineConfig
     
     config = PipelineConfig()
     collector = MassCollector(config)
-    collector.run(start_stage="detect", end_stage="detect")
+    collector.run(start_stage="process", end_stage="process")
     
-    return {"stage": "detect"}
+    return {"stage": "process"}
 
 
-def build_imitation_data(**context):
+def quality_check(**context):
     """
-    Task 4: 모방학습 데이터 생성
+    Task 4: 품질 평가 및 필터링
     
-    MediaPipe로 포즈를 추출하고 State-Action 데이터를 생성합니다.
+    에피소드 품질 등급(A/B/C/D)을 평가하고 기준 미달 데이터를 필터링합니다.
     """
-    import subprocess
+    from mass_collector import MassCollector, PipelineConfig
     
-    cmd = [
-        sys.executable,
-        str(PROJECT_ROOT / "scripts" / "pipeline" / "build_imitation_data.py"),
-        "--fps", "5",
-        "--max-frames", "100",
-    ]
+    config = PipelineConfig()
+    collector = MassCollector(config)
+    collector.run(start_stage="quality", end_stage="quality")
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        raise Exception(f"모방학습 데이터 생성 실패: {result.stderr}")
-    
-    return {"stage": "build_imitation_data"}
+    return {"stage": "quality"}
 
 
 def upload_to_s3(**context):
@@ -140,15 +133,19 @@ def upload_to_s3(**context):
     return {"stage": "upload"}
 
 
-def send_notification(**context):
+def cleanup(**context):
     """
-    Task 6: 완료 알림 (옵션)
+    Task 6: 로컬 RAW 파일 정리
     
-    파이프라인 완료 시 슬랙/이메일 알림을 보냅니다.
+    업로드 완료된 로컬 raw 파일과 임시 파일을 정리합니다.
     """
-    # TODO: 슬랙 웹훅 또는 이메일 알림 구현
-    print("✅ 파이프라인 완료!")
-    return {"stage": "notification"}
+    from mass_collector import MassCollector, PipelineConfig
+    
+    config = PipelineConfig()
+    collector = MassCollector(config)
+    collector.run(start_stage="cleanup", end_stage="cleanup")
+    
+    return {"stage": "cleanup"}
 
 
 # ============================================================================
@@ -156,77 +153,84 @@ def send_notification(**context):
 # ============================================================================
 
 if AIRFLOW_AVAILABLE:
-    # 기본 인자
+    # 기본 인자 (D4-1: exponential backoff, 재시도 1회)
     default_args = {
         "owner": "robot-team",
         "depends_on_past": False,
         "email_on_failure": False,
         "email_on_retry": False,
-        "retries": 3,
-        "retry_delay": timedelta(minutes=5),
-        "execution_timeout": timedelta(hours=4),
+        "retries": 1,
+        "retry_delay": timedelta(minutes=10),
+        "retry_exponential_backoff": True,
+        "execution_timeout": timedelta(hours=6),
     }
     
     # DAG 생성
     dag = DAG(
         dag_id="robot_arm_collection",
         default_args=default_args,
-        description="로봇팔 영상 자동 수집 파이프라인",
+        description="로봇팔 영상 자동 수집 파이프라인 (목표 5000건)",
         schedule_interval="0 6 * * *",  # 매일 오전 6시
         start_date=datetime(2026, 2, 10),
         catchup=False,
         tags=["robot", "video", "collection", "imitation-learning"],
         params={
-            "target_count": 100,  # 기본 목표 수집량
+            "target_count": 5000,  # 목표 수집량 5000
         },
     )
     
-    # Task 정의
+    # Task 정의 (D4-1: per-task execution_timeout)
     with dag:
-        # Task 1: 크롤링
+        # Task 1: 크롤링 (30분)
         crawl_task = PythonOperator(
             task_id="crawl_videos",
             python_callable=crawl_videos,
             provide_context=True,
+            execution_timeout=timedelta(minutes=30),
         )
         
-        # Task 2: 다운로드
+        # Task 2: 다운로드 (5시간)
         download_task = PythonOperator(
             task_id="download_videos",
             python_callable=download_videos,
             provide_context=True,
+            execution_timeout=timedelta(hours=5),
         )
         
-        # Task 3: 객체 검출
-        detect_task = PythonOperator(
-            task_id="detect_objects",
-            python_callable=detect_objects,
+        # Task 3: GPU 처리 (5시간)
+        process_task = PythonOperator(
+            task_id="process_videos",
+            python_callable=process_videos,
             provide_context=True,
+            execution_timeout=timedelta(hours=5),
         )
         
-        # Task 4: 모방학습 데이터 생성
-        build_il_task = PythonOperator(
-            task_id="build_imitation_data",
-            python_callable=build_imitation_data,
+        # Task 4: 품질 평가 (30분)
+        quality_task = PythonOperator(
+            task_id="quality_check",
+            python_callable=quality_check,
             provide_context=True,
+            execution_timeout=timedelta(minutes=30),
         )
         
-        # Task 5: S3 업로드
+        # Task 5: S3 업로드 (2시간)
         upload_task = PythonOperator(
             task_id="upload_s3",
             python_callable=upload_to_s3,
             provide_context=True,
+            execution_timeout=timedelta(hours=2),
         )
         
-        # Task 6: 알림 (선택)
-        notify_task = PythonOperator(
-            task_id="send_notification",
-            python_callable=send_notification,
+        # Task 6: 정리
+        cleanup_task = PythonOperator(
+            task_id="cleanup",
+            python_callable=cleanup,
             provide_context=True,
+            execution_timeout=timedelta(minutes=30),
         )
         
-        # 의존성 정의
-        crawl_task >> download_task >> detect_task >> build_il_task >> upload_task >> notify_task
+        # 의존성 정의 (D4-1: process + quality + cleanup 체인)
+        crawl_task >> download_task >> process_task >> quality_task >> upload_task >> cleanup_task
 
 
 # ============================================================================
@@ -235,17 +239,17 @@ if AIRFLOW_AVAILABLE:
 
 def test_dag():
     """DAG 로컬 테스트"""
-    print("🧪 DAG 로컬 테스트")
+    print("🧪 DAG 로컬 테스트 (v2 - 5000 목표)")
     print("=" * 60)
     
     # 각 함수 개별 테스트 (실제로는 실행하지 않음)
     tasks = [
         ("crawl_videos", crawl_videos),
         ("download_videos", download_videos),
-        ("detect_objects", detect_objects),
-        ("build_imitation_data", build_imitation_data),
+        ("process_videos", process_videos),
+        ("quality_check", quality_check),
         ("upload_to_s3", upload_to_s3),
-        ("send_notification", send_notification),
+        ("cleanup", cleanup),
     ]
     
     for name, func in tasks:
@@ -258,6 +262,7 @@ def test_dag():
         print(f"✅ Airflow DAG 'robot_arm_collection' 정의됨")
         print(f"   스케줄: 매일 오전 6시")
         print(f"   시작일: 2026-02-10")
+        print(f"   체인: crawl >> download >> process >> quality >> upload >> cleanup")
     else:
         print("⚠️ Airflow가 설치되지 않음 - DAG 미생성")
 

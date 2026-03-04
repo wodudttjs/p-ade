@@ -27,12 +27,24 @@ logger = setup_logger(__name__)
 @dataclass
 class AsyncCrawlConfig:
     """비동기 크롤러 설정"""
-    max_concurrent: int = 100          # 동시 요청 수
+    max_concurrent: int = 200          # 동시 요청 수
     timeout_sec: float = 30.0          # 요청 타임아웃
     retry_count: int = 3               # 재시도 횟수
     retry_delay_sec: float = 2.0       # 재시도 대기 시간
-    rate_limit_per_sec: float = 10.0   # 초당 최대 요청 수
+    rate_limit_per_sec: float = 10.0   # 초당 최대 요청 수 (기본: YouTube API)
     jitter_sec: float = 0.5            # 랜덤 지터
+
+    # 소스별 독립 레이트 리밋 (req/sec)
+    source_rate_limits: dict = None
+
+    def __post_init__(self):
+        if self.source_rate_limits is None:
+            self.source_rate_limits = {
+                "youtube": 10.0,
+                "google_videos": 5.0,
+                "vimeo": 3.0,
+                "bilibili": 2.0,
+            }
 
 
 @dataclass
@@ -343,14 +355,34 @@ class AsyncYouTubeCrawler(AsyncCrawlerBase):
 class AsyncMultiSourceCrawler:
     """
     다중 소스 비동기 크롤러
-    
+
     여러 검색 소스에서 동시에 크롤링을 수행합니다.
+    소스별 독립 레이트 리밋 적용:
+      - YouTube API: 10 req/sec
+      - Google Videos: 5 req/sec
+      - Vimeo: 3 req/sec
+      - Bilibili: 2 req/sec
     """
-    
+
     def __init__(self, config: Optional[AsyncCrawlConfig] = None):
         self.config = config or AsyncCrawlConfig()
+
+        # 소스별 독립 설정으로 크롤러 생성
+        source_limits = self.config.source_rate_limits or {}
+
+        def _make_config(source: str) -> AsyncCrawlConfig:
+            rate = source_limits.get(source, self.config.rate_limit_per_sec)
+            return AsyncCrawlConfig(
+                max_concurrent=self.config.max_concurrent,
+                timeout_sec=self.config.timeout_sec,
+                retry_count=self.config.retry_count,
+                retry_delay_sec=self.config.retry_delay_sec,
+                rate_limit_per_sec=rate,
+                jitter_sec=self.config.jitter_sec,
+            )
+
         self._crawlers: Dict[str, AsyncCrawlerBase] = {
-            "youtube": AsyncYouTubeCrawler(config),
+            "youtube": AsyncYouTubeCrawler(_make_config("youtube")),
         }
     
     async def crawl_all_sources(

@@ -62,23 +62,24 @@ logger = setup_logger(__name__)
 class PipelineConfig:
     """파이프라인 설정"""
     # 수집 목표
-    target_count: int = 500
+    target_count: int = 5000
     
     # 크롤링 설정
-    sources: List[str] = field(default_factory=lambda: ["youtube", "google_videos"])
-    languages: List[str] = field(default_factory=lambda: ["en", "ko"])
-    crawl_workers: int = 4
+    sources: List[str] = field(default_factory=lambda: ["youtube", "google_videos", "vimeo", "bilibili"])
+    languages: List[str] = field(default_factory=lambda: ["en", "ko", "ja", "zh", "de"])
+    crawl_workers: int = 16
     crawl_full_info: bool = False
     min_duration_sec: int = 30
     max_duration_sec: int = 1200
     content_filter: bool = True
-    use_multiprocess: bool = False  # 멀티프로세스 크롤링 모드
-    use_async: bool = False  # 비동기 크롤링 모드
-    
+    max_keywords: int = 500           # 크롤링 키워드 수
+    use_multiprocess: bool = True     # 멀티프로세스 크롤링 모드
+    use_async: bool = True            # 비동기 크롤링 모드 (기본: True, Task A2-2)
+
     # 다운로드 설정
-    download_workers: int = 6
-    download_timeout: int = 600
-    download_quality: str = "720p"
+    download_workers: int = 12
+    download_timeout: int = 300
+    download_quality: str = "480p"
     
     # 검출 설정
     detect_fps: float = 5.0
@@ -88,9 +89,13 @@ class PipelineConfig:
     
     # 품질 평가 설정
     quality_filter: bool = True  # 품질 필터링 활성화
-    quality_threshold: float = 60.0  # 통과 점수 (100점 만점)
-    
-    # 모방학습 데이터 생성 설정
+    quality_threshold: float = 50.0  # 통과 점수 (60 → 50 완화, 목표 통과율 65%)
+
+    # 통합 처리 설정 (1-Pass Detect+IL)
+    unified_processing: bool = True   # True=1-Pass 통합, False=기존 2-Pass
+    num_gpu_streams: int = 6          # GPU 스트림 수 (dual-GPU: 3+3)
+
+    # 모방학습 데이터 생성 설정 (unified_processing=False 시 사용)
     build_il: bool = True  # 모방학습 데이터 생성 활성화
     il_fps: float = 5.0  # 추출 FPS
     il_max_frames: Optional[int] = None  # 비디오당 최대 프레임
@@ -98,7 +103,11 @@ class PipelineConfig:
     # 업로드 설정
     s3_bucket: str = ""
     s3_prefix: str = "episodes"
-    upload_workers: int = 4
+    upload_workers: int = 8
+    cleanup_after_upload: bool = True  # S3 업로드 후 로컬 파일 삭제
+    
+    # 파이프라인 실행 식별
+    run_id: str = ""                   # 실행 ID (비어있으면 자동 생성)
     
     # 경로
     db_path: str = "data/pade.db"
@@ -115,7 +124,7 @@ class PipelineConfig:
     @property
     def crawl_multiplier(self) -> float:
         """목표 대비 크롤링 초과 수집 배수 (필터링 감안)"""
-        return 3.0
+        return 4.0
     
     @property
     def crawl_target(self) -> int:
@@ -190,7 +199,7 @@ class PipelineReport:
 class MassCollector:
     """대량 수집 파이프라인 오케스트레이터"""
 
-    STAGES = ["crawl", "download", "detect", "build_il", "quality", "upload"]
+    STAGES = ["crawl", "download", "process", "quality", "upload", "cleanup"]
 
     def __init__(self, config: PipelineConfig, on_stage_start=None, on_stage_complete=None, on_log=None):
         """
@@ -233,6 +242,29 @@ class MassCollector:
             except Exception:
                 pass
 
+    def _publish_progress(self, stage: str, status: str, current: int, total: int, count: int = 0):
+        """Redis에 진행률 발행 (D1-2: SSE 스트리밍용)"""
+        try:
+            import redis as _redis
+            r = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+                socket_timeout=2,
+            )
+            percent = (current / total * 100) if total > 0 else 0
+            r.publish("pade:progress", json.dumps({
+                "stage": stage,
+                "status": status,
+                "current": current,
+                "total": total,
+                "percent": round(percent, 1),
+                "count": count,
+                "timestamp": datetime.now().isoformat(),
+            }))
+        except Exception:
+            pass  # Redis 미연결 시 무시
+
     def run(self, start_stage: Optional[str] = None, end_stage: Optional[str] = None):
         """파이프라인 실행"""
         stages = self.STAGES.copy()
@@ -260,6 +292,19 @@ class MassCollector:
         print(header)
         self._notify_log(f"파이프라인 시작: {' → '.join(stages)} (목표: {self.config.target_count})")
 
+        # 파이프라인 시작 시 이전 실행 잔여파일 정리 (C3-2)
+        try:
+            from storage.disk_policy import DiskPolicy
+            disk = DiskPolicy(
+                raw_dir=self.config.raw_dir,
+                episodes_dir=self.config.episodes_dir,
+            )
+            count, freed = disk.cleanup_old_runs(days=7)
+            if count > 0:
+                print(f"  🧹 이전 실행 파일 정리: {count}개 삭제, {freed:.2f}GB 확보")
+        except Exception as e:
+            logger.warning(f"이전 실행 파일 정리 실패 (무시): {e}")
+
         for stage_name in stages:
             print(f"\n{'─'*70}")
             print(f"📌 단계: {stage_name.upper()}")
@@ -276,10 +321,20 @@ class MassCollector:
             self._notify_stage_start(stage_name)
             self._notify_log(f"[INFO] ▶ {stage_name.upper()} 단계 시작...")
 
+            # Redis 진행률 발행 (D1-2)
+            self._publish_progress(stage_name, "started", 0, len(stages))
+
             try:
                 result = handler()
                 self.report.stages.append(asdict(result))
                 print(f"  {result.summary()}")
+
+                # Redis 진행률 발행 (D1-2)
+                stage_idx = stages.index(stage_name) + 1
+                self._publish_progress(
+                    stage_name, "completed" if result.success else "failed",
+                    stage_idx, len(stages), result.count,
+                )
 
                 # 스테이지 완료 알림
                 self._notify_stage_complete(stage_name, result)
@@ -335,9 +390,20 @@ class MassCollector:
         else:
             gen = KeywordGenerator(
                 languages=self.config.languages,
-                max_keywords=200,
+                max_keywords=self.config.max_keywords,
             )
-            keywords = gen.get_flat_keywords(max_count=50)
+            # 카테시안 조합 풀에서 상위 키워드 추출
+            cartesian = gen.generate_cartesian_all()
+            flat = gen.get_flat_keywords(max_count=self.config.max_keywords)
+            # 카테시안 + 기존을 합쳐서 중복 제거 후 상위 max_keywords
+            seen = set()
+            keywords = []
+            for kw in flat + cartesian:
+                kw_lower = kw.lower().strip()
+                if kw_lower not in seen:
+                    seen.add(kw_lower)
+                    keywords.append(kw)
+            keywords = keywords[:self.config.max_keywords]
 
         print(f"  🔑 {len(keywords)}개 키워드 생성됨")
         for i, kw in enumerate(keywords[:10], 1):
@@ -372,6 +438,25 @@ class MassCollector:
 
         results, stats = crawler.crawl(keywords)
 
+        # GlobalVideoRegistry 필터: 이미 수집된 영상 제거
+        try:
+            from cache.video_registry import get_registry
+            registry = get_registry(self.config.db_path)
+            result_dicts = [
+                {"video_id": r.video_id, "url": r.url}
+                for r in results
+            ]
+            new_dicts = registry.filter_new_only(result_dicts)
+            new_ids = {d["video_id"] for d in new_dicts}
+            before = len(results)
+            results = [r for r in results if r.video_id in new_ids]
+            registry_blocked = before - len(results)
+            if registry_blocked > 0:
+                logger.info(f"🚫 Registry 중복 차단: {registry_blocked}개, 신규: {len(results)}개")
+        except Exception as e:
+            logger.warning(f"Registry 필터 실패 (무시): {e}")
+            registry_blocked = 0
+
         # CSV 저장
         csv_path = Path(self.config.urls_csv)
         crawler.save_csv(results, csv_path, overwrite=True)
@@ -392,6 +477,7 @@ class MassCollector:
                 "db_saved": saved,
                 "duplicates": stats.total_duplicates,
                 "filtered": stats.total_filtered,
+                "registry_blocked": registry_blocked,
                 "by_source": stats.by_source,
                 "mode": "async" if self.config.use_async else "sync",
             },
@@ -474,14 +560,18 @@ class MassCollector:
                 elapsed_sec=time.time() - start,
             )
 
-        # 이미 다운로드된 파일 확인 (resume)
-        if self.config.resume:
-            existing = set(p.stem for p in output_dir.glob("*.mp4"))
+        # GlobalVideoRegistry 체크: 이미 수집된 video_id 스킵
+        try:
+            from cache.video_registry import get_registry
+            registry = get_registry(self.config.db_path)
             before = len(videos)
-            videos = [v for v in videos if v["video_id"] not in existing]
-            skipped = before - len(videos)
-            if skipped > 0:
-                print(f"  ⏭️ 이미 다운로드됨: {skipped}개 스킵")
+            videos = [v for v in videos if not registry.is_collected(v["video_id"])]
+            registry_skipped = before - len(videos)
+            if registry_skipped > 0:
+                logger.info(f"Already collected: {registry_skipped}, New: {len(videos)}")
+                print(f"  🚫 Registry 중복: {registry_skipped}개 스킵")
+        except Exception as e:
+            logger.warning(f"Registry 체크 실패 (무시): {e}")
 
         # 목표 수만큼만 다운로드
         videos = videos[:self.config.target_count]
@@ -496,6 +586,22 @@ class MassCollector:
                 details={"target": len(videos), "dry_run": True},
                 elapsed_sec=time.time() - start,
             )
+
+        # 디스크 공간 확인 (C3-2: 다운로드 전 ensure_space)
+        try:
+            from storage.disk_policy import DiskPolicy
+            disk = DiskPolicy(
+                raw_dir=str(output_dir),
+                episodes_dir=self.config.episodes_dir,
+            )
+            if not disk.ensure_space():
+                return StageResult(
+                    stage="download", success=False, errors=1,
+                    details={"error": "디스크 공간 부족 (최소 100GB 필요)"},
+                    elapsed_sec=time.time() - start,
+                )
+        except Exception as e:
+            logger.warning(f"디스크 공간 확인 실패 (무시): {e}")
 
         # parallel_download 모듈 사용
         from scripts.pipeline.parallel_download import parallel_download, save_results_to_db
@@ -531,7 +637,176 @@ class MassCollector:
         )
 
     # ============================================================
-    # 3단계: 객체 검출 & Episode 생성
+    # 3단계: 통합 처리 (1-Pass Detect + IL) — Task B1-1/B1-2
+    # ============================================================
+
+    def _stage_process(self) -> StageResult:
+        """
+        1-Pass 통합 처리: YOLO 객체 검출 + MediaPipe 포즈 추출 + State-Action 인코딩
+        비디오 1회 디코딩으로 Detect+IL을 동시에 처리 (처리 시간 40% 단축 목표)
+        """
+        start = time.time()
+        raw_dir = Path(self.config.raw_dir)
+        episodes_dir = Path(self.config.episodes_dir)
+        episodes_dir.mkdir(parents=True, exist_ok=True)
+
+        video_files = sorted(raw_dir.glob("*.mp4"))
+        if not video_files:
+            return StageResult(
+                stage="process", success=False, errors=1,
+                details={"error": "처리할 비디오 없음"},
+                elapsed_sec=time.time() - start,
+            )
+
+        # 이미 처리된 영상 스킵
+        existing = {p.stem.replace("_episode", "") for p in episodes_dir.glob("*.npz")}
+        pending = [str(v) for v in video_files if v.stem not in existing]
+
+        print(f"  📂 비디오: {len(video_files)}개 (기처리: {len(existing)}개, 대상: {len(pending)}개)")
+
+        if not pending:
+            return StageResult(
+                stage="process", success=True, count=len(existing),
+                details={"message": "모든 비디오가 이미 처리됨", "skipped": len(existing)},
+                elapsed_sec=time.time() - start,
+            )
+
+        if self.config.dry_run:
+            return StageResult(
+                stage="process", success=True, count=0,
+                details={"target": len(pending), "dry_run": True},
+                elapsed_sec=time.time() - start,
+            )
+
+        success_count = 0
+        fail_count = 0
+
+        if self.config.unified_processing:
+            # ── 1-Pass 통합 처리 (UnifiedVideoProcessor + GPU 6-Stream) ──
+            try:
+                from gpu.stream_manager import GPU3StreamManager, StreamConfig
+                from gpu.unified_processor import UnifiedVideoProcessor
+
+                stream_cfg = StreamConfig(
+                    num_streams=self.config.num_gpu_streams,
+                    streams_per_gpu=self.config.num_gpu_streams // 2,
+                )
+                stream_mgr = GPU3StreamManager(config=stream_cfg)
+
+                unified_proc = UnifiedVideoProcessor(
+                    output_fps=self.config.il_fps,
+                    device=self.config.detect_device or "cuda:0",
+                    max_frames=self.config.il_max_frames,
+                )
+
+                def _unified_processor_fn(video_path: str):
+                    video_id = Path(video_path).stem
+                    out_path = str(episodes_dir / f"{video_id}_episode.npz")
+                    return unified_proc.process(video_path, out_path)
+
+                results = stream_mgr.process_batch(
+                    pending[:self.config.target_count],
+                    processor=_unified_processor_fn,
+                    output_dir=str(episodes_dir),
+                )
+
+                stream_mgr.print_stats()
+
+                for r in results:
+                    if r and r.get("success"):
+                        success_count += 1
+                        status = r.get("status", "success")
+                        if status != "skipped":
+                            print(f"  ✅ {r.get('video_id', '?')}: {r.get('frames', 0)}f "
+                                  f"S:{r.get('state_dim', '?')} A:{r.get('action_dim', '?')}")
+                    else:
+                        fail_count += 1
+                        print(f"  ❌ {r.get('video_id', '?')}: {r.get('error', 'unknown')}")
+
+                self.report.total_episodes = len(existing) + success_count
+                self.report.total_il_episodes = len(existing) + success_count
+
+            except Exception as e:
+                logger.error(f"통합 처리 실패, 폴백: {e}")
+                # 폴백: 기존 방식으로 실행
+                self.config.unified_processing = False
+                return self._stage_process()
+
+        else:
+            # ── 폴백: 기존 2-Pass (detect → build_il) ──
+            try:
+                r1 = self._stage_detect()
+                r2 = self._stage_build_il()
+                success_count = r1.count + r2.count
+                fail_count = r1.errors + r2.errors
+            except Exception as e:
+                logger.error(f"폴백 처리 실패: {e}")
+                fail_count += 1
+
+        return StageResult(
+            stage="process",
+            success=success_count > 0,
+            count=success_count,
+            errors=fail_count,
+            elapsed_sec=time.time() - start,
+            details={
+                "mode": "unified_1pass" if self.config.unified_processing else "legacy_2pass",
+                "new_processed": success_count,
+                "previously_done": len(existing),
+                "failed": fail_count,
+                "fps": self.config.il_fps,
+                "gpu_streams": self.config.num_gpu_streams,
+            },
+        )
+
+    def _stage_cleanup(self) -> StageResult:
+        """정리 단계: 처리 완료된 원본 MP4 삭제, 품질 탈락 NPZ 삭제, 통계 출력"""
+        start = time.time()
+        total_deleted = 0
+        total_freed = 0.0
+
+        try:
+            from storage.disk_policy import DiskPolicy
+            disk = DiskPolicy(
+                raw_dir=self.config.raw_dir,
+                episodes_dir=self.config.episodes_dir,
+            )
+
+            # 처리 완료된 원본 MP4 삭제 (에피소드가 있는 영상의 원본)
+            episodes_dir = Path(self.config.episodes_dir)
+            if episodes_dir.exists():
+                processed_ids = [
+                    p.stem.replace("_episode", "")
+                    for p in episodes_dir.glob("*.npz")
+                ]
+                if processed_ids:
+                    count, freed = disk.cleanup_raw_videos(video_ids=processed_ids)
+                    total_deleted += count
+                    total_freed += freed
+
+            # 품질 탈락 NPZ 삭제
+            count, freed = disk.cleanup_rejected()
+            total_deleted += count
+            total_freed += freed
+
+            usage = disk.get_disk_usage()
+            print(f"  🧹 정리 완료: {total_deleted}개 삭제, {total_freed:.2f}GB 확보")
+            print(f"  💾 디스크 여유: {usage['free_gb']:.1f}GB ({100 - usage['usage_percent']:.1f}%)")
+
+        except Exception as e:
+            logger.warning(f"정리 단계 오류 (무시): {e}")
+
+        return StageResult(
+            stage="cleanup", success=True, count=total_deleted,
+            details={
+                "deleted_files": total_deleted,
+                "freed_gb": round(total_freed, 2),
+            },
+            elapsed_sec=time.time() - start,
+        )
+
+    # ============================================================
+    # (레거시) 3단계: 객체 검출 & Episode 생성
     # ============================================================
 
     def _stage_detect(self) -> StageResult:
@@ -835,7 +1110,7 @@ class MassCollector:
                 elapsed_sec=time.time() - start,
             )
 
-        # 품질 평가
+        # 품질 평가 (배치 벡터화)
         config = QualityConfig(pass_threshold=self.config.quality_threshold)
         evaluator = RobotArmQualityEvaluator(config=config)
         stats = QualityStats()
@@ -844,24 +1119,47 @@ class MassCollector:
         failed_count = 0
         errors = 0
 
-        for npz_path in npz_files:
+        # evaluate_batch() 호출 (DB 마킹으로 파일 이동 없이 처리)
+        try:
+            batch_results = evaluator.evaluate_batch(
+                [str(p) for p in npz_files],
+                db_path=self.config.db_path,
+            )
+        except Exception as e:
+            logger.error(f"배치 평가 실패, 순차 평가로 폴백: {e}")
+            batch_results = []
+            for npz_path in npz_files:
+                try:
+                    batch_results.append(evaluator.evaluate_npz(str(npz_path)))
+                except Exception as ex:
+                    logger.warning(f"평가 실패: {npz_path.name} - {ex}")
+                    errors += 1
+
+        for result in batch_results:
             try:
-                video_id = npz_path.stem.replace("_episode", "")
-                result = evaluator.evaluate_npz(str(npz_path), video_id=video_id)
                 stats.record(result)
+                npz_path = episodes_dir / f"{result.video_id}_episode.npz"
 
                 if result.passed:
                     passed_count += 1
                 else:
                     failed_count += 1
-                    # 실패한 에피소드 이동 (삭제 대신 rejected 폴더로)
-                    rejected_dir = episodes_dir / "rejected"
-                    rejected_dir.mkdir(exist_ok=True)
-                    npz_path.rename(rejected_dir / npz_path.name)
+                    reason = result.fail_reason or "quality_check_failed"
+
+                    # Registry에 rejected 등록 (재수집 방지)
+                    try:
+                        from cache.video_registry import get_registry
+                        registry = get_registry(self.config.db_path)
+                        registry.register_rejected(result.video_id, reason)
+                    except Exception:
+                        pass
+
+                    # 파일 이동 대신 DB 마킹 (디스크 I/O 절약)
+                    # evaluate_batch() 내부에서 이미 DB 마킹됨
 
             except Exception as e:
                 errors += 1
-                logger.warning(f"품질 평가 실패: {npz_path.name} - {e}")
+                logger.warning(f"품질 결과 처리 실패: {result.video_id} - {e}")
 
         # 보고서 출력
         stats.print_report()
@@ -932,6 +1230,15 @@ class MassCollector:
             uploaded = 0
             errors = 0
 
+            # Registry 준비
+            try:
+                from cache.video_registry import get_registry
+                registry = get_registry(self.config.db_path)
+            except Exception:
+                registry = None
+
+            run_id = self.report.started_at
+
             for npz_file in npz_files:
                 try:
                     result = upload_file(
@@ -941,9 +1248,15 @@ class MassCollector:
                         prefix=self.config.s3_prefix,
                         data_type="episode",
                     )
-                    if result.get("status") in ("uploaded", "completed"):
+                    status = result.get("status")
+                    if status in ("uploaded", "completed"):
                         uploaded += 1
-                    elif result.get("status") == "skipped":
+                        # S3 업로드 성공 시 Registry 등록
+                        if registry:
+                            video_id = npz_file.stem.replace("_episode", "")
+                            s3_path = result.get("s3_path", "")
+                            registry.register(video_id, "", run_id, s3_path)
+                    elif status == "skipped":
                         uploaded += 1  # 이미 존재
                 except Exception as e:
                     errors += 1
@@ -951,13 +1264,34 @@ class MassCollector:
 
             self.report.total_uploaded = uploaded
 
+            # S3 업로드 완료 후 로컬 파일 정리 (C3-2)
+            cleanup_count = 0
+            cleanup_freed = 0.0
+            if uploaded > 0:
+                try:
+                    from storage.disk_policy import DiskPolicy
+                    disk = DiskPolicy(
+                        raw_dir=self.config.raw_dir,
+                        episodes_dir=self.config.episodes_dir,
+                    )
+                    cleanup_count, cleanup_freed = disk.cleanup_after_upload(run_id=run_id)
+                    if cleanup_count > 0:
+                        print(f"  🧹 업로드 후 정리: {cleanup_count}개 삭제, {cleanup_freed:.2f}GB 확보")
+                except Exception as e:
+                    logger.warning(f"업로드 후 정리 실패 (무시): {e}")
+
             return StageResult(
                 stage="upload",
                 success=uploaded > 0,
                 count=uploaded,
                 errors=errors,
                 elapsed_sec=time.time() - start,
-                details={"bucket": bucket, "prefix": self.config.s3_prefix},
+                details={
+                    "bucket": bucket,
+                    "prefix": self.config.s3_prefix,
+                    "cleanup_files": cleanup_count,
+                    "cleanup_freed_gb": round(cleanup_freed, 2),
+                },
             )
 
         except Exception as e:
@@ -1045,12 +1379,12 @@ def main():
     parser.add_argument("--start-stage", help="시작 단계")
     parser.add_argument("--end-stage", help="종료 단계")
     parser.add_argument("--keywords", help="커스텀 키워드 (콤마 구분)")
-    parser.add_argument("--sources", default="youtube,google_videos",
-                       help="소스 (기본: youtube,google_videos)")
-    parser.add_argument("--languages", default="en,ko", help="키워드 언어 (기본: en,ko)")
+    parser.add_argument("--sources", default="youtube,google_videos,vimeo,bilibili",
+                       help="소스 (기본: youtube,google_videos,vimeo,bilibili)")
+    parser.add_argument("--languages", default="en,ko,ja,zh,de", help="키워드 언어 (기본: en,ko,ja,zh,de)")
     parser.add_argument("--crawl-workers", type=int, default=4)
-    parser.add_argument("--download-workers", type=int, default=6)
-    parser.add_argument("--download-timeout", type=int, default=600)
+    parser.add_argument("--download-workers", type=int, default=12)
+    parser.add_argument("--download-timeout", type=int, default=300)
     parser.add_argument("--detect-fps", type=float, default=5.0)
     parser.add_argument("--detect-device", default=None, help="검출 디바이스 (예: cuda:0)")
     parser.add_argument("--s3-bucket", default="")
@@ -1070,6 +1404,8 @@ def main():
     parser.add_argument("--no-build-il", action="store_true", help="모방학습 데이터 생성 비활성화")
     parser.add_argument("--il-fps", type=float, default=5.0, help="IL 추출 FPS (기본: 5)")
     parser.add_argument("--il-max-frames", type=int, default=None, help="IL 비디오당 최대 프레임")
+    parser.add_argument("--no-unified", action="store_true", help="1-Pass 통합 처리 비활성화 (기존 2-Pass 사용)")
+    parser.add_argument("--gpu-streams", type=int, default=6, help="GPU 스트림 수 (기본: 6)")
 
     args = parser.parse_args()
 
@@ -1099,6 +1435,8 @@ def main():
         build_il=not args.no_build_il,
         il_fps=args.il_fps,
         il_max_frames=args.il_max_frames,
+        unified_processing=not args.no_unified,
+        num_gpu_streams=args.gpu_streams,
     )
 
     # 커스텀 키워드 적용

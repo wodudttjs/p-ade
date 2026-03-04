@@ -15,6 +15,17 @@ from ingestion.metadata_extractor import VideoMetadata
 from core.logging_config import logger
 
 
+def _register_rejected_to_registry(video_id: str, reason: str, db_path: Optional[str] = None):
+    """품질 탈락 영상을 GlobalVideoRegistry에 등록 (재크롤 시 자동 제외)"""
+    try:
+        from cache.video_registry import get_registry
+        registry = get_registry(db_path)
+        registry.register_rejected(video_id, reason)
+        logger.debug(f"Registry rejected 등록: {video_id} ({reason})")
+    except Exception as e:
+        logger.debug(f"Registry rejected 등록 실패 (무시): {e}")
+
+
 class QualityLevel(Enum):
     """품질 등급"""
     EXCELLENT = "excellent"
@@ -321,6 +332,7 @@ class QualityFilterPipeline:
         self,
         metadata: VideoMetadata,
         video_info: Optional[Dict] = None,
+        db_path: Optional[str] = None,
     ) -> QualityScore:
         """비디오 처리"""
         self.stats['total'] += 1
@@ -333,6 +345,11 @@ class QualityFilterPipeline:
             self.stats['accepted'] += 1
         else:
             self.stats['rejected'] += 1
+            # Registry에 rejected 영상 등록 (재크롤 시 자동 제외, Task A3-1)
+            video_id = video_info.get('id', '') if video_info else ''
+            if video_id:
+                reason = ', '.join(score.rejection_reasons) or 'quality_rejected'
+                _register_rejected_to_registry(video_id, reason, db_path)
         
         return score
     

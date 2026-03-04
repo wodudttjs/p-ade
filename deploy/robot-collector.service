@@ -27,11 +27,11 @@ WorkingDirectory=/home/robotuser/p-ade
 # 환경 변수
 Environment="PATH=/home/robotuser/p-ade/.venv/bin:/usr/local/bin:/usr/bin"
 Environment="PYTHONUNBUFFERED=1"
-Environment="CUDA_VISIBLE_DEVICES=0"
+Environment="CUDA_VISIBLE_DEVICES=0,1"
 Environment="ENVIRONMENT=production"
 
 # 실행 명령
-ExecStart=/home/robotuser/p-ade/.venv/bin/python main.py run-forever --target 500 --interval 60
+ExecStart=/home/robotuser/p-ade/.venv/bin/python main.py run-forever --target 5000 --interval 60
 ExecStop=/bin/kill -SIGTERM $MAINPID
 
 # 재시작 정책
@@ -58,7 +58,7 @@ SyslogIdentifier=robot-collector
 
 # 리소스 제한
 LimitNOFILE=65536
-MemoryMax=8G
+MemoryMax=16G
 
 [Install]
 WantedBy=multi-user.target

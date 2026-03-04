@@ -70,26 +70,27 @@ class CrawlCache:
         
         if REDIS_AVAILABLE:
             self._connect()
-    
+
     def _connect(self) -> bool:
-        """Redis 연결"""
+        """Redis 연결 (ConnectionPool 사용)"""
         if not REDIS_AVAILABLE:
             _logger.warning("redis 패키지가 설치되지 않음")
             return False
-        
+
         try:
-            self._client = redis.Redis(
+            pool = redis.ConnectionPool(
                 host=self.config.host,
                 port=self.config.port,
                 db=self.config.db,
                 password=self.config.password,
                 decode_responses=True,
-                socket_timeout=3,
-                socket_connect_timeout=3,
-                retry_on_timeout=False,
+                max_connections=50,
+                socket_timeout=5,
+                socket_connect_timeout=5,
+                retry_on_timeout=True,
             )
-            # 연결 테스트
-            result = self._client.ping()
+            self._client = redis.Redis(connection_pool=pool)
+            self._client.ping()
             self._connected = True
             _logger.info(f"Redis 연결 성공 ({self.config.host}:{self.config.port})")
             return True
@@ -348,13 +349,129 @@ class CrawlCache:
         """캐시 크기 정보"""
         if not self._connected:
             return {"search_keys": 0, "video_keys": 0}
-        
+
         try:
             search_keys = len(self._client.keys("search:*"))
             video_keys = len(self._client.keys("video:*"))
             return {"search_keys": search_keys, "video_keys": video_keys}
         except Exception:
             return {"search_keys": 0, "video_keys": 0}
+
+    # =========================================================================
+    # 키 prefix 분리 메서드 (pade:registry / pade:cache / pade:queue)
+    # =========================================================================
+
+    def set_registry(self, key: str, value: Any) -> bool:
+        """
+        pade:registry:* 키 저장 (TTL 없음 — 영구 보존)
+
+        Args:
+            key: 레지스트리 키 (prefix 자동 추가)
+            value: 저장할 값 (str/dict 모두 허용)
+
+        Returns:
+            성공 여부
+        """
+        if not self._connected:
+            return False
+        try:
+            full_key = f"pade:registry:{key}"
+            data = json.dumps(value) if not isinstance(value, str) else value
+            self._client.set(full_key, data)
+            return True
+        except Exception:
+            return False
+
+    def get_registry(self, key: str) -> Optional[Any]:
+        """pade:registry:* 키 조회"""
+        if not self._connected:
+            return None
+        try:
+            full_key = f"pade:registry:{key}"
+            data = self._client.get(full_key)
+            if data is None:
+                return None
+            try:
+                return json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                return data
+        except Exception:
+            return None
+
+    def set_cache(self, key: str, value: Any, ttl: int = 21600) -> bool:
+        """
+        pade:cache:* 키 저장 (기본 TTL: 6시간)
+
+        Args:
+            key: 캐시 키 (prefix 자동 추가)
+            value: 저장할 값
+            ttl: TTL 초 (기본 6시간)
+
+        Returns:
+            성공 여부
+        """
+        if not self._connected:
+            return False
+        try:
+            full_key = f"pade:cache:{key}"
+            data = json.dumps(value) if not isinstance(value, str) else value
+            self._client.setex(full_key, ttl, data)
+            return True
+        except Exception:
+            return False
+
+    def get_cache_key(self, key: str) -> Optional[Any]:
+        """pade:cache:* 키 조회"""
+        if not self._connected:
+            return None
+        try:
+            full_key = f"pade:cache:{key}"
+            data = self._client.get(full_key)
+            if data is None:
+                return None
+            try:
+                return json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                return data
+        except Exception:
+            return None
+
+    def set_queue(self, key: str, value: Any) -> bool:
+        """
+        pade:queue:* 키 저장 (TTL 없음 — 큐 소비 시 삭제)
+
+        Args:
+            key: 큐 키 (prefix 자동 추가)
+            value: 저장할 값
+
+        Returns:
+            성공 여부
+        """
+        if not self._connected:
+            return False
+        try:
+            full_key = f"pade:queue:{key}"
+            data = json.dumps(value) if not isinstance(value, str) else value
+            self._client.rpush(full_key, data)
+            return True
+        except Exception:
+            return False
+
+    def get_queue(self, key: str) -> Optional[Any]:
+        """pade:queue:* 에서 항목 하나 꺼내기 (LPOP)"""
+        if not self._connected:
+            return None
+        try:
+            full_key = f"pade:queue:{key}"
+            data = self._client.lpop(full_key)
+            if data is None:
+                return None
+            try:
+                return json.loads(data)
+            except (json.JSONDecodeError, TypeError):
+                return data
+        except Exception:
+            return None
 
 
 # 싱글톤 인스턴스 (옵션)
