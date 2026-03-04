@@ -172,10 +172,14 @@ p-ade-master/
 ├── tests/                     # 테스트
 │   └── ... (28개 테스트 파일)
 │
+├── deploy/                    # 배포 설정
+│   ├── docker-compose.yml         # Docker Compose
+│   ├── Dockerfile                 # 컨테이너 이미지
+│   └── redis.conf                 # Redis 설정
+│
 ├── data/                      # 데이터 디렉토리
 │   ├── raw/                       # 다운로드된 mp4
 │   ├── episodes/                  # 생성된 npz (검출 + IL 데이터)
-│   ├── pade.db                    # SQLite DB
 │   └── jobs_history.json          # 작업 히스토리 (영속화)
 │
 └── requirements.txt           # 의존성
@@ -186,16 +190,20 @@ p-ade-master/
 ### 설치
 
 ```bash
-# 가상환경 생성
-python -m venv venv
-source venv/bin/activate
-
 # 패키지 설치
 pip install -r requirements.txt
 
-# Redis 설치 (캐싱용)
-sudo apt install redis-server
+# PostgreSQL 설치 & 설정
+sudo apt install -y postgresql postgresql-contrib
+sudo systemctl start postgresql
+sudo systemctl enable postgresql
+sudo -u postgres psql -c "CREATE USER pade WITH PASSWORD 'pade' CREATEDB;"
+sudo -u postgres psql -c "CREATE DATABASE pade OWNER pade;"
+
+# Redis 설치 (캐싱/큐)
+sudo apt install -y redis-server
 sudo systemctl start redis
+sudo systemctl enable redis
 ```
 
 ### 환경설정
@@ -204,11 +212,23 @@ sudo systemctl start redis
 # .env 파일 생성 (.env.example 참고)
 cp .env.example .env
 
-# 필수 항목 (S3 업로드 시)
+# 필수: PostgreSQL (기본값으로 동작)
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=pade
+POSTGRES_USER=pade
+POSTGRES_PASSWORD=pade
+
+# 필수: Redis (기본값으로 동작)
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_DB=0
+
+# 선택: AWS S3 업로드 시
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_REGION=us-east-1
-S3_BUCKET=p-ade-datasets
+AWS_S3_BUCKET=p-ade-datasets
 ```
 
 ### 3. 서버 모드 실행 (권장)
@@ -297,16 +317,28 @@ for t in range(len(actions)):
 | 영역 | 기술 |
 |------|------|
 | **언어** | Python 3.13+ |
-| **크롤링** | yt-dlp, Scrapy, aiohttp, requests |
-| **AI/ML** | YOLOv8 (ultralytics), MediaPipe Tasks, PyTorch 2.10 |
-| **GPU** | CUDA 3-Stream 병렬 (RTX 3080 × 2), CPU 폴백 |
+| **크롤링** | yt-dlp 2026.2, aiohttp, requests |
+| **AI/ML** | YOLOv8 (ultralytics 8.4), MediaPipe Tasks, PyTorch 2.7 |
+| **GPU** | CUDA 3-Stream 병렬 (듀얼 GPU), CPU 폴백 |
 | **데이터** | NumPy, Polars, SciPy, h5py |
 | **클라우드** | AWS S3 (boto3) |
-| **DB** | SQLite (SQLAlchemy) |
-| **큐/캐시** | Redis |
-| **웹 UI** | Flask, Bootstrap 5, 실시간 로그 |
+| **DB** | PostgreSQL 14 (SQLAlchemy 2.0) |
+| **큐/캐시** | Redis 6+ |
+| **웹 UI** | Flask 3.1, Bootstrap 5, 실시간 로그 |
 | **모니터링** | loguru, psutil, GPU/VRAM 모니터 |
 | **테스트** | pytest |
+
+## 🖥️ 시스템 요구사항
+
+| 항목 | 최소 사양 |
+|------|-----------|
+| **OS** | Ubuntu 22.04+ (x86_64) |
+| **Python** | 3.13+ |
+| **PostgreSQL** | 14+ |
+| **Redis** | 6+ |
+| **GPU** | CUDA 지원 GPU (선택, CPU 폴백 가능) |
+| **RAM** | 16GB+ |
+| **디스크** | 100GB+ (영상 다운로드/처리용) |
 
 ## 📝 라이선스
 
