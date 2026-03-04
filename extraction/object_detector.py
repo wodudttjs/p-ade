@@ -219,6 +219,74 @@ class ObjectDetector:
         
         return detections
     
+    def detect_batch(
+        self,
+        frames: List[np.ndarray],
+        frame_indices: Optional[List[int]] = None,
+        timestamps: Optional[List[float]] = None,
+        batch_size: int = 16,
+    ) -> List[FrameDetections]:
+        """
+        배치 프레임 검출 (GPU 활용 극대화)
+
+        Args:
+            frames: BGR 이미지 리스트
+            frame_indices: 프레임 번호 리스트 (None = 0, 1, 2, ...)
+            timestamps: 타임스탬프 리스트 (None = 0.0)
+            batch_size: 한 번에 YOLO에 전달할 배치 크기
+
+        Returns:
+            FrameDetections 리스트
+        """
+        self._load_model()
+
+        if frame_indices is None:
+            frame_indices = list(range(len(frames)))
+        if timestamps is None:
+            timestamps = [0.0] * len(frames)
+
+        all_detections: List[FrameDetections] = []
+
+        for batch_start in range(0, len(frames), batch_size):
+            batch_frames = frames[batch_start:batch_start + batch_size]
+            batch_indices = frame_indices[batch_start:batch_start + batch_size]
+            batch_ts = timestamps[batch_start:batch_start + batch_size]
+
+            # YOLO 배치 추론
+            results_list = self.model.predict(
+                batch_frames,
+                conf=self.conf_threshold,
+                iou=self.iou_threshold,
+                verbose=False,
+            )
+
+            for result, fidx, ts in zip(results_list, batch_indices, batch_ts):
+                detections = FrameDetections(frame_idx=fidx, timestamp=ts)
+                boxes = result.boxes
+
+                for box in boxes:
+                    class_id = int(box.cls[0])
+                    class_name = self.class_names[class_id]
+
+                    if class_name not in self.target_classes:
+                        continue
+
+                    confidence = float(box.conf[0])
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    bbox = (int(x1), int(y1), int(x2), int(y2))
+
+                    detections.objects.append(DetectedObject(
+                        class_id=class_id,
+                        class_name=class_name,
+                        confidence=confidence,
+                        bbox=bbox,
+                    ))
+
+                all_detections.append(detections)
+
+        logger.info(f"Batch detection completed: {len(all_detections)} frames in {len(range(0, len(frames), batch_size))} batches")
+        return all_detections
+
     def detect_video(
         self,
         video_path: str,

@@ -58,8 +58,9 @@ def download_single(
     url: str,
     output_dir: Path,
     timeout: int = 300,
+    max_retries: int = 3,
 ) -> DownloadResult:
-    """단일 비디오 다운로드 (yt-dlp Python API 사용)"""
+    """단일 비디오 다운로드 (yt-dlp Python API, 지수 백오프 재시도)"""
     import yt_dlp
 
     start_time = time.time()
@@ -81,52 +82,74 @@ def download_single(
     if deno_dir.exists() and str(deno_dir) not in os.environ.get("PATH", ""):
         os.environ["PATH"] = str(deno_dir) + os.pathsep + os.environ.get("PATH", "")
 
+    ydl_opts = {
+        "format": "best[height<=480]/best",
+        "outtmpl": str(output_path),
+        "no_playlist": True,
+        "quiet": True,
+        "no_warnings": True,
+        "socket_timeout": min(timeout, 60),
+        "retries": 1,  # yt-dlp 내부 재시도는 최소화, 외부 루프에서 제어
+        "ratelimit": 5 * 1024 * 1024,  # 5 MB/s 대역폭 제한
+    }
+
+    last_error = None
+    for attempt in range(max_retries + 1):
+        # 지수 백오프: 2초, 4초, 8초
+        if attempt > 0:
+            backoff = 2 ** attempt  # 2, 4, 8
+            logger.debug(f"재시도 {attempt}/{max_retries} ({backoff}초 대기): {video_id}")
+            time.sleep(backoff)
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            if output_path.exists():
+                duration = time.time() - start_time
+                return DownloadResult(
+                    video_id=video_id,
+                    url=url,
+                    success=True,
+                    video_path=str(output_path),
+                    size_bytes=output_path.stat().st_size,
+                    duration_sec=duration,
+                )
+            else:
+                last_error = "Download completed but file not found"
+        except Exception as e:
+            last_error = str(e)[:500]
+
+    # 모든 재시도 실패
+    return DownloadResult(
+        video_id=video_id,
+        url=url,
+        success=False,
+        error=last_error,
+    )
+
+
+def _check_disk_space(output_dir: Path, min_gb: int = 100) -> bool:
+    """디스크 여유 공간 확인 (최소 min_gb GB 필요)"""
     try:
-        ydl_opts = {
-            "format": "best[height<=720]",
-            "outtmpl": str(output_path),
-            "no_playlist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "socket_timeout": min(timeout, 60),
-            "retries": 2,
-        }
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        if output_path.exists():
-            duration = time.time() - start_time
-            return DownloadResult(
-                video_id=video_id,
-                url=url,
-                success=True,
-                video_path=str(output_path),
-                size_bytes=output_path.stat().st_size,
-                duration_sec=duration,
-            )
-        else:
-            return DownloadResult(
-                video_id=video_id,
-                url=url,
-                success=False,
-                error="Download completed but file not found",
-            )
-
-    except Exception as e:
-        return DownloadResult(
-            video_id=video_id,
-            url=url,
-            success=False,
-            error=str(e)[:500],
-        )
+        import shutil
+        total, used, free = shutil.disk_usage(output_dir)
+        free_gb = free / (1024 ** 3)
+        if free_gb < min_gb:
+            logger.warning(f"⚠️ 디스크 여유 공간 부족: {free_gb:.1f}GB (최소 {min_gb}GB 필요)")
+            return False
+        return True
+    except Exception:
+        return True  # 확인 실패 시 진행
 
 
 def parallel_download(
     videos: List[Dict[str, str]],
     output_dir: Path,
-    num_workers: int = 4,
+    num_workers: int = 12,
     timeout: int = 300,
+    max_retries: int = 3,
+    min_disk_gb: int = 100,
 ) -> List[DownloadResult]:
     """
     병렬 다운로드
@@ -134,13 +157,21 @@ def parallel_download(
     Args:
         videos: [{"video_id": "...", "url": "..."}] 형태의 리스트
         output_dir: 출력 디렉토리
-        num_workers: 워커 수
-        timeout: 타임아웃 (초)
+        num_workers: 워커 수 (기본: 12)
+        timeout: 타임아웃 (기본: 300초)
+        max_retries: 다운로드 실패 시 재시도 횟수 (기본: 3, 지수 백오프)
+        min_disk_gb: 최소 필요 디스크 여유 공간 GB (기본: 100)
 
     Returns:
         다운로드 결과 리스트
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 디스크 공간 사전 확인
+    if not _check_disk_space(output_dir, min_disk_gb):
+        print(f"  ❌ 디스크 여유 공간 부족 — 다운로드 중단 (최소 {min_disk_gb}GB 필요)")
+        return []
+
     results = []
 
     total = len(videos)
@@ -156,6 +187,7 @@ def parallel_download(
     print(f"  총 파일: {total}개")
     print(f"  워커 수: {num_workers}")
     print(f"  타임아웃: {timeout}초")
+    print(f"  재시도: {max_retries}회 (지수 백오프)")
     print()
 
     start_time = time.time()
@@ -168,6 +200,7 @@ def parallel_download(
                 v["url"],
                 output_dir,
                 timeout,
+                max_retries,
             ): v
             for v in videos
         }
@@ -358,9 +391,10 @@ def main():
     source_group.add_argument("--video-ids", nargs="+", help="비디오 ID 목록")
 
     parser.add_argument("--limit", type=int, default=10, help="검색 결과 수 (기본: 10)")
-    parser.add_argument("--workers", type=int, default=4, help="워커 수 (기본: 4)")
+    parser.add_argument("--workers", type=int, default=12, help="워커 수 (기본: 12)")
     parser.add_argument("--output", default="data/raw", help="출력 디렉토리")
     parser.add_argument("--timeout", type=int, default=300, help="타임아웃 초 (기본: 300)")
+    parser.add_argument("--retries", type=int, default=3, help="재시도 횟수 (기본: 3)")
     parser.add_argument("--dry-run", action="store_true", help="실제 다운로드 없이 테스트")
 
     args = parser.parse_args()
@@ -400,6 +434,7 @@ def main():
         output_dir=output_dir,
         num_workers=args.workers,
         timeout=args.timeout,
+        max_retries=args.retries,
     )
 
     # 결과 저장

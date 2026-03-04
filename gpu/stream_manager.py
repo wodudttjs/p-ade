@@ -34,99 +34,144 @@ except ImportError:
 @dataclass
 class StreamConfig:
     """스트림 설정"""
-    num_streams: int = 3              # 동시 스트림 수
-    vram_limit_gb: float = 9.0        # VRAM 한계 (GB)
+    num_streams: int = 6              # 동시 스트림 수 (dual-GPU: 3+3)
+    gpu_ids: List[int] = None         # 사용할 GPU ID 목록 (None=자동)
+    streams_per_gpu: int = 3          # GPU당 스트림 수
+    vram_limit_ratio: float = 0.85    # 총 VRAM의 85% 사용
+    vram_limit_gb: float = 9.0        # 단일 GPU VRAM 한계 (레거시 호환)
     target_fps: int = 30              # 기본 타겟 FPS
     long_video_fps: int = 15          # 긴 영상(60초+) FPS
     long_video_threshold_sec: int = 60
 
+    def __post_init__(self):
+        if self.gpu_ids is None:
+            if CUDA_AVAILABLE:
+                n = torch.cuda.device_count()
+                self.gpu_ids = list(range(min(n, 2)))  # 최대 2개 GPU
+            else:
+                self.gpu_ids = [0]
+
 
 class GPU3StreamManager:
     """
-    GPU 3-Stream 병렬 처리 매니저
-    
-    CUDA Stream을 사용하여 3개의 영상을 동시에 처리합니다.
-    
+    GPU 6-Stream 병렬 처리 매니저 (Dual-GPU 지원)
+
+    CUDA Stream을 사용하여 최대 6개의 영상을 동시에 처리합니다.
+    GPU가 1개면 3-Stream, 2개 이상이면 6-Stream(각 GPU에 3개).
+
+    영상 길이별 라우팅:
+      - < 30초:  batch 4 (짧은 영상)
+      - 30-60초: batch 2 (중간 영상)
+      - > 60초:  CPUWorkerPool에 위임
+
     사용법:
         manager = GPU3StreamManager()
-        results = manager.process_batch(video_paths)
+        results = manager.process_batch(video_paths, processor)
     """
-    
+
     def __init__(self, config: Optional[StreamConfig] = None):
         self.config = config or StreamConfig()
         self._lock = threading.Lock()
-        
+
         # 통계
         self._stats = {
             "total_processed": 0,
             "total_time_sec": 0,
             "peak_vram_gb": 0,
         }
-        
-        # CUDA 스트림 초기화
-        self._streams: List = []
-        self._device = None
-        
+
+        # CUDA 스트림: {gpu_id: [Stream, ...]}
+        self._streams: Dict[int, List] = {}
+        self._devices: List = []
+
         if CUDA_AVAILABLE:
             self._init_cuda()
         else:
             logger.warning("⚠️ CUDA 사용 불가 - CPU 모드로 동작")
-    
+
     def _init_cuda(self):
-        """CUDA 초기화"""
-        self._device = torch.device("cuda:0")
-        self._streams = [cuda.Stream() for _ in range(self.config.num_streams)]
-        
-        # GPU 정보 로깅
-        gpu_name = torch.cuda.get_device_name(0)
-        total_memory = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        logger.info(f"🎮 GPU 초기화: {gpu_name} ({total_memory:.1f} GB)")
+        """Dual-GPU CUDA 초기화"""
+        available_gpus = torch.cuda.device_count()
+        gpu_ids = [g for g in self.config.gpu_ids if g < available_gpus]
+
+        if not gpu_ids:
+            gpu_ids = [0]
+
+        for gpu_id in gpu_ids:
+            device = torch.device(f"cuda:{gpu_id}")
+            self._devices.append(device)
+            with torch.cuda.device(gpu_id):
+                streams = [cuda.Stream() for _ in range(self.config.streams_per_gpu)]
+                self._streams[gpu_id] = streams
+
+            gpu_name = torch.cuda.get_device_name(gpu_id)
+            total_memory = torch.cuda.get_device_properties(gpu_id).total_memory / 1024 ** 3
+            logger.info(f"🎮 GPU {gpu_id} 초기화: {gpu_name} ({total_memory:.1f} GB, {self.config.streams_per_gpu} streams)")
+
+        total_streams = sum(len(s) for s in self._streams.values())
+        logger.info(f"✅ 총 {total_streams} Stream on {len(gpu_ids)} GPU(s)")
     
     # =========================================================================
     # VRAM 모니터링
     # =========================================================================
     
-    def get_vram_usage(self) -> Dict[str, float]:
-        """VRAM 사용량 조회 (GB)"""
+    def get_vram_usage(self, gpu_id: int = 0) -> Dict[str, float]:
+        """GPU별 VRAM 사용량 조회 (GB)"""
         if not CUDA_AVAILABLE:
-            return {"allocated": 0, "reserved": 0, "available": 0}
-        
-        allocated = torch.cuda.memory_allocated() / 1024**3
-        reserved = torch.cuda.memory_reserved() / 1024**3
-        total = torch.cuda.get_device_properties(0).total_memory / 1024**3
-        
-        return {
-            "allocated": allocated,
-            "reserved": reserved,
-            "available": total - reserved,
-            "total": total,
-        }
-    
-    def check_vram_health(self) -> bool:
-        """VRAM 상태 확인"""
-        usage = self.get_vram_usage()
-        
-        if usage["allocated"] > self.config.vram_limit_gb:
-            logger.warning(f"⚠️ VRAM 한계 초과: {usage['allocated']:.2f} GB")
+            return {"allocated": 0, "reserved": 0, "available": 0, "total": 0}
+
+        try:
+            allocated = torch.cuda.memory_allocated(gpu_id) / 1024 ** 3
+            reserved = torch.cuda.memory_reserved(gpu_id) / 1024 ** 3
+            total = torch.cuda.get_device_properties(gpu_id).total_memory / 1024 ** 3
+            return {
+                "allocated": allocated,
+                "reserved": reserved,
+                "available": total - reserved,
+                "total": total,
+            }
+        except Exception:
+            return {"allocated": 0, "reserved": 0, "available": 0, "total": 0}
+
+    def get_all_vram_usage(self) -> Dict[int, Dict[str, float]]:
+        """모든 GPU VRAM 사용량"""
+        result = {}
+        for gpu_id in self.config.gpu_ids:
+            result[gpu_id] = self.get_vram_usage(gpu_id)
+        return result
+
+    def check_vram_health(self, gpu_id: int = 0) -> bool:
+        """GPU VRAM 상태 확인 (85% 한계)"""
+        usage = self.get_vram_usage(gpu_id)
+        limit = usage["total"] * self.config.vram_limit_ratio
+        if usage["allocated"] > limit:
+            logger.warning(f"⚠️ GPU {gpu_id} VRAM 한계 초과: {usage['allocated']:.2f}/{limit:.2f} GB")
             return False
-        
         return True
-    
-    def auto_adjust_batch_size(self) -> int:
-        """VRAM 여유에 따라 배치 크기 자동 조정"""
+
+    def auto_adjust_batch_size(self, gpu_id: int = 0) -> int:
+        """VRAM 여유에 따라 배치 크기 자동 조정 (GPU별)"""
         if not CUDA_AVAILABLE:
             return 1
-        
-        usage = self.get_vram_usage()
-        allocated = usage["allocated"]
-        
-        if allocated < 6.0:
-            return 4  # 여유 있음
-        elif allocated < 8.0:
-            return 3  # 정상
+        usage = self.get_vram_usage(gpu_id)
+        total = max(usage["total"], 1.0)
+        ratio = usage["allocated"] / total
+        if ratio < 0.5:
+            return 4
+        elif ratio < 0.7:
+            return 3
         else:
-            return 2  # 부족
-    
+            return 2
+
+    def get_batch_size_by_duration(self, duration_sec: float) -> int:
+        """영상 길이별 배치 크기 결정"""
+        if duration_sec < 30:
+            return 4   # 짧은 영상: batch 4
+        elif duration_sec <= 60:
+            return 2   # 중간 영상: batch 2
+        else:
+            return 0   # 긴 영상: CPU 워커로 위임
+
     def get_optimal_fps(self, video_duration_sec: float) -> int:
         """영상 길이에 따른 최적 FPS 결정"""
         if video_duration_sec > self.config.long_video_threshold_sec:
@@ -141,80 +186,118 @@ class GPU3StreamManager:
         self,
         video_paths: List[str],
         processor: Optional[Callable] = None,
+        output_dir: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        3개 영상 동시 처리
-        
+        영상 길이별 GPU/CPU 라우팅 + 6-Stream 병렬 처리
+
         Args:
             video_paths: 비디오 경로 목록
-            processor: 처리 함수 (기본: MediaPipe 포즈 추출)
-            
+            processor: 처리 함수 (None이면 기본 프로세서 사용)
+            output_dir: NPZ 저장 디렉토리 (UnifiedVideoProcessor 사용 시)
+
         Returns:
             처리 결과 목록
         """
         if processor is None:
             processor = self._default_processor
-        
+
         start_time = time.time()
-        batch_size = min(len(video_paths), self.auto_adjust_batch_size())
-        results = []
-        
-        logger.info(f"🎬 배치 처리 시작: {len(video_paths)}개 영상 (배치 크기: {batch_size})")
-        
-        for i in range(0, len(video_paths), batch_size):
-            batch = video_paths[i:i+batch_size]
-            
-            # VRAM 확인
-            if not self.check_vram_health():
-                # 메모리 정리 후 재시도
-                if CUDA_AVAILABLE:
-                    torch.cuda.empty_cache()
-                batch_size = max(1, batch_size - 1)
-            
-            # 병렬 처리
-            batch_results = self._process_batch_parallel(batch, processor)
-            results.extend(batch_results)
-            
-            # 진행률 로깅
-            progress = len(results) / len(video_paths) * 100
-            logger.info(f"  진행률: {len(results)}/{len(video_paths)} ({progress:.1f}%)")
-        
+        results: List[Dict[str, Any]] = []
+
+        # ── 영상 길이별 분류 ──
+        from gpu.cpu_worker_pool import CPUWorkerPool
+        short_paths, long_paths = CPUWorkerPool.split_by_duration(
+            video_paths, threshold_sec=self.config.long_video_threshold_sec
+        )
+
+        logger.info(
+            f"🎬 배치 처리 시작: 총 {len(video_paths)}개 "
+            f"(GPU: {len(short_paths)}개, CPU: {len(long_paths)}개)"
+        )
+
+        # ── 긴 영상 → CPU WorkerPool (비동기) ──
+        cpu_future = None
+        if long_paths:
+            import concurrent.futures
+            cpu_pool = CPUWorkerPool()
+            _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            cpu_future = _executor.submit(cpu_pool.process, long_paths, output_dir)
+
+        # ── 짧은/중간 영상 → GPU 6-Stream ──
+        if short_paths:
+            batch_size = min(len(short_paths), self.auto_adjust_batch_size())
+
+            for i in range(0, len(short_paths), batch_size):
+                batch = short_paths[i:i + batch_size]
+
+                # VRAM 상태 확인 (GPU별)
+                for gpu_id in self.config.gpu_ids:
+                    if not self.check_vram_health(gpu_id):
+                        if CUDA_AVAILABLE:
+                            torch.cuda.empty_cache()
+                        batch_size = max(1, batch_size - 1)
+                        break
+
+                batch_results = self._process_batch_parallel(batch, processor)
+                results.extend(batch_results)
+
+                progress = (i + len(batch)) / max(len(short_paths), 1) * 100
+                logger.info(f"  GPU 진행률: {i + len(batch)}/{len(short_paths)} ({progress:.1f}%)")
+
+        # ── CPU 결과 수집 ──
+        if cpu_future is not None:
+            try:
+                cpu_results = cpu_future.result(timeout=3600)  # 1시간 타임아웃
+                results.extend(cpu_results)
+            except Exception as e:
+                logger.error(f"CPU WorkerPool 오류: {e}")
+            finally:
+                _executor.shutdown(wait=False)
+
         elapsed = time.time() - start_time
-        
+
         # 통계 업데이트
         with self._lock:
             self._stats["total_processed"] += len(results)
             self._stats["total_time_sec"] += elapsed
-            
-            if CUDA_AVAILABLE:
-                peak_vram = torch.cuda.max_memory_allocated() / 1024**3
+
+            if CUDA_AVAILABLE and self.config.gpu_ids:
+                peak_vram = max(
+                    torch.cuda.max_memory_allocated(gid) / 1024 ** 3
+                    for gid in self.config.gpu_ids
+                    if gid < torch.cuda.device_count()
+                )
                 self._stats["peak_vram_gb"] = max(self._stats["peak_vram_gb"], peak_vram)
-        
+
         logger.info(f"✅ 배치 처리 완료: {len(results)}개, {elapsed:.1f}초")
-        
+
         return results
-    
+
     def _process_batch_parallel(
         self,
         batch: List[str],
         processor: Callable,
     ) -> List[Dict[str, Any]]:
-        """배치 병렬 처리"""
+        """배치 병렬 처리 (Dual-GPU 스트림 분배)"""
         results = []
-        
+        num_gpus = len(self.config.gpu_ids)
+
         with ThreadPoolExecutor(max_workers=len(batch)) as executor:
             futures = []
-            
-            for stream_id, video_path in enumerate(batch):
+            for slot, video_path in enumerate(batch):
+                # GPU 및 스트림 할당 (round-robin)
+                gpu_id = self.config.gpu_ids[slot % num_gpus]
+                stream_slot = (slot // num_gpus) % self.config.streams_per_gpu
                 future = executor.submit(
                     self._process_single,
                     video_path,
-                    stream_id,
+                    gpu_id,
+                    stream_slot,
                     processor,
                 )
                 futures.append(future)
-            
-            # 결과 수집
+
             for future in futures:
                 try:
                     result = future.result()
@@ -222,24 +305,27 @@ class GPU3StreamManager:
                         results.append(result)
                 except Exception as e:
                     logger.error(f"처리 실패: {e}")
-        
+
         return results
-    
+
     def _process_single(
         self,
         video_path: str,
-        stream_id: int,
+        gpu_id: int,
+        stream_slot: int,
         processor: Callable,
     ) -> Optional[Dict[str, Any]]:
-        """단일 스트림에서 처리"""
+        """단일 스트림에서 처리 (GPU별 스트림 사용)"""
         try:
-            if CUDA_AVAILABLE and stream_id < len(self._streams):
-                with cuda.stream(self._streams[stream_id]):
-                    return processor(video_path)
+            gpu_streams = self._streams.get(gpu_id, [])
+            if CUDA_AVAILABLE and stream_slot < len(gpu_streams):
+                with torch.cuda.device(gpu_id):
+                    with cuda.stream(gpu_streams[stream_slot]):
+                        return processor(video_path)
             else:
                 return processor(video_path)
         except Exception as e:
-            logger.error(f"스트림 {stream_id} 처리 실패: {e}")
+            logger.error(f"GPU {gpu_id} 스트림 {stream_slot} 처리 실패: {e}")
             return None
     
     def _default_processor(self, video_path: str) -> Dict[str, Any]:
@@ -674,10 +760,12 @@ class GPU3StreamManager:
         """통계 출력"""
         s = self._stats
         avg_time = s["total_time_sec"] / max(1, s["total_processed"])
-        
+        n_gpus = len(self.config.gpu_ids)
+        total_streams = n_gpus * self.config.streams_per_gpu
+
         print(f"""
 {'='*60}
-📊 GPU 3-Stream 처리 통계
+📊 GPU {total_streams}-Stream 처리 통계 ({n_gpus} GPU)
 {'='*60}
   총 처리: {s['total_processed']}개
   총 시간: {s['total_time_sec']:.1f}초

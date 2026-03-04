@@ -93,6 +93,89 @@ def register_task4_rules(manager):
     logger.info("Task 4.2 알림 규칙 4개 등록 완료")
 
 
+def register_5k_rules(manager):
+    """
+    Developer D 신규 알림 규칙 6개 등록 (D3-1)
+
+    - disk_space_low: 여유 < 50GB → CRITICAL
+    - download_stall: 10분간 다운로드 0건 → WARNING
+    - dedup_rate_high: 중복률 > 70% → WARNING
+    - pipeline_timeout: 단일 스테이지 > 2시간 → ERROR
+    - quality_drop: 통과율 < 30% → ERROR
+    - run_complete: 파이프라인 완료 → INFO
+    """
+    from alerts.manager import AlertRule, AlertChannel
+    from alerts.slack import AlertLevel
+
+    # 1. 디스크 공간 부족
+    manager.register_rule(AlertRule(
+        name="disk_space_low",
+        condition=lambda disk_free_gb=999, **_: disk_free_gb < 50,
+        channels=[AlertChannel.SLACK, AlertChannel.EMAIL, AlertChannel.LOG],
+        severity=AlertLevel.CRITICAL,
+        cooldown_seconds=1800,
+        description="Disk space low",
+        labels={"component": "storage"},
+    ))
+
+    # 2. 다운로드 멈춤
+    manager.register_rule(AlertRule(
+        name="download_stall",
+        condition=lambda download_speed=1, **_: download_speed == 0,
+        channels=[AlertChannel.SLACK, AlertChannel.LOG],
+        severity=AlertLevel.WARNING,
+        cooldown_seconds=600,
+        description="Download stalled for 10 minutes",
+        labels={"component": "download"},
+    ))
+
+    # 3. 중복률 높음
+    manager.register_rule(AlertRule(
+        name="dedup_rate_high",
+        condition=lambda dedup_rate=0, **_: dedup_rate > 70,
+        channels=[AlertChannel.SLACK, AlertChannel.LOG],
+        severity=AlertLevel.WARNING,
+        cooldown_seconds=3600,
+        description="High duplicate rate (keyword exhaustion?)",
+        labels={"component": "crawl"},
+    ))
+
+    # 4. 스테이지 타임아웃
+    manager.register_rule(AlertRule(
+        name="pipeline_timeout",
+        condition=lambda stage_duration_hours=0, **_: stage_duration_hours > 2,
+        channels=[AlertChannel.SLACK, AlertChannel.EMAIL, AlertChannel.LOG],
+        severity=AlertLevel.ERROR,
+        cooldown_seconds=3600,
+        description="Stage timeout",
+        labels={"component": "pipeline"},
+    ))
+
+    # 5. 품질 통과율 급락
+    manager.register_rule(AlertRule(
+        name="quality_drop",
+        condition=lambda quality_pass_rate=100, **_: quality_pass_rate < 30,
+        channels=[AlertChannel.SLACK, AlertChannel.EMAIL, AlertChannel.LOG],
+        severity=AlertLevel.ERROR,
+        cooldown_seconds=3600,
+        description="Quality pass rate dropped",
+        labels={"component": "quality"},
+    ))
+
+    # 6. 파이프라인 완료
+    manager.register_rule(AlertRule(
+        name="run_complete",
+        condition=lambda pipeline_completed=False, **_: pipeline_completed is True,
+        channels=[AlertChannel.SLACK, AlertChannel.LOG],
+        severity=AlertLevel.INFO,
+        cooldown_seconds=0,
+        description="Pipeline completed",
+        labels={"component": "pipeline"},
+    ))
+
+    logger.info("Developer D 신규 알림 규칙 6개 등록 완료")
+
+
 # ============================================================
 # 메트릭 수집기
 # ============================================================
@@ -350,6 +433,7 @@ if __name__ == "__main__":
     mgr = get_alert_manager()
     register_default_rules(mgr)
     register_task4_rules(mgr)
+    register_5k_rules(mgr)
 
     loop = AlertMonitorLoop(
         alert_manager=mgr,

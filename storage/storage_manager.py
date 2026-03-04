@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 import json
 
 from core.logging_config import logger
+from storage.disk_policy import DiskPolicy
 
 
 @dataclass
@@ -42,6 +43,8 @@ class StorageManager:
         max_usage_percent: float = 80.0,
         min_free_gb: float = 10.0,
         cleanup_age_hours: int = 24,
+        raw_dir: Optional[str] = None,
+        episodes_dir: Optional[str] = None,
     ):
         """
         Args:
@@ -49,14 +52,25 @@ class StorageManager:
             max_usage_percent: 최대 디스크 사용률 (%)
             min_free_gb: 최소 여유 공간 (GB)
             cleanup_age_hours: 자동 정리 기준 시간
+            raw_dir: 원본 MP4 디렉토리 (DiskPolicy 연동)
+            episodes_dir: 에피소드 NPZ 디렉토리 (DiskPolicy 연동)
         """
         self.temp_dir = Path(temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self.max_usage_percent = max_usage_percent
         self.min_free_gb = min_free_gb
         self.cleanup_age_hours = cleanup_age_hours
-        
+
+        # DiskPolicy 연동
+        _raw = raw_dir or str(self.temp_dir.parent / "raw")
+        _eps = episodes_dir or str(self.temp_dir.parent / "episodes")
+        self.disk_policy = DiskPolicy(
+            raw_dir=_raw,
+            episodes_dir=_eps,
+            min_free_gb=min_free_gb,
+        )
+
         # 메타데이터 파일
         self.metadata_file = self.temp_dir / ".storage_metadata.json"
         self.metadata = self._load_metadata()
@@ -430,6 +444,82 @@ class StorageManager:
         
         return deleted_count, freed_bytes
     
+    # =========================================================================
+    # DiskPolicy 연동 메서드
+    # =========================================================================
+
+    def cleanup_after_upload(
+        self,
+        video_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        s3_paths: Optional[List[str]] = None,
+    ) -> Tuple[int, float]:
+        """
+        S3 업로드 성공 확인 후 로컬 NPZ + 원본 MP4 삭제
+
+        Args:
+            video_id: 특정 video_id만 삭제 (None이면 run_id 기준)
+            run_id: run_id 기준 삭제 (None이면 전체)
+            s3_paths: 업로드된 S3 경로 목록 (검증용, 현재 미사용)
+
+        Returns:
+            (삭제 파일 수, 확보 GB)
+        """
+        total_count = 0
+        total_freed = 0.0
+
+        if video_id:
+            # 특정 video_id 파일만 삭제
+            for pattern in [f"{video_id}*.npz", f"{video_id}*.mp4"]:
+                for target_dir in [self.disk_policy.episodes_dir, self.disk_policy.raw_dir]:
+                    for f in target_dir.glob(pattern):
+                        try:
+                            size = f.stat().st_size
+                            f.unlink()
+                            total_freed += size / (1024 ** 3)
+                            total_count += 1
+                            logger.info(f"업로드 후 삭제: {f.name}")
+                        except Exception as e:
+                            logger.error(f"삭제 실패: {f} — {e}")
+        else:
+            # run_id 기준 또는 전체 NPZ 삭제
+            count, freed = self.disk_policy.cleanup_after_upload(run_id=run_id)
+            total_count += count
+            total_freed += freed
+
+        logger.info(
+            f"cleanup_after_upload 완료: {total_count}개 삭제, "
+            f"{total_freed:.2f}GB 확보"
+        )
+        return total_count, total_freed
+
+    def cleanup_rejected(self) -> Tuple[int, float]:
+        """
+        품질 탈락 NPZ 즉시 삭제
+
+        Returns:
+            (삭제 파일 수, 확보 GB)
+        """
+        count, freed = self.disk_policy.cleanup_rejected()
+        logger.info(f"cleanup_rejected 완료: {count}개 삭제, {freed:.2f}GB 확보")
+        return count, freed
+
+    def cleanup_old_runs(self, days: int = 7) -> Tuple[int, float]:
+        """
+        N일 이전 실행 잔여파일 정리 (MP4 + NPZ)
+
+        Args:
+            days: 기준 일수 (기본 7일)
+
+        Returns:
+            (삭제 파일 수, 확보 GB)
+        """
+        count, freed = self.disk_policy.cleanup_old_runs(days=days)
+        logger.info(
+            f"cleanup_old_runs({days}일) 완료: {count}개 삭제, {freed:.2f}GB 확보"
+        )
+        return count, freed
+
     def get_stats_summary(self) -> Dict:
         """
         통계 요약

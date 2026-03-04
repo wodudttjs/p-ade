@@ -153,6 +153,31 @@ def get_file_stats() -> Dict[str, int]:
     }
     
     try:
+        # DB 기반 통계 우선 (5K 스케일 대응)
+        conn = get_db_connection()
+        if conn:
+            try:
+                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'downloaded'")
+                stats["raw_videos"] = cur.fetchone()[0]
+                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
+                stats["uploaded"] = cur.fetchone()[0]
+                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status IN ('processed', 'uploaded')")
+                stats["episodes"] = cur.fetchone()[0]
+                conn.close()
+            except Exception:
+                conn.close()
+                stats = _get_file_stats_fallback(data_dir, stats)
+        else:
+            stats = _get_file_stats_fallback(data_dir, stats)
+    except Exception:
+        pass
+    
+    return stats
+
+
+def _get_file_stats_fallback(data_dir, stats):
+    """DB 연결 실패 시 파일시스템 폴백"""
+    try:
         raw_dir = data_dir / "raw"
         if raw_dir.exists():
             mp4_files = list(raw_dir.glob("*.mp4"))
@@ -164,36 +189,8 @@ def get_file_stats() -> Dict[str, int]:
             npz_files = list(episodes_dir.glob("*.npz"))
             stats["episodes"] = len(npz_files)
             stats["total_size_mb"] += sum(f.stat().st_size for f in npz_files) / (1024 * 1024)
-            
-            # IL 에피소드 카운트 (states 키가 있는 npz)
-            import numpy as np
-            il_count = 0
-            for f in npz_files:
-                try:
-                    d = np.load(str(f), allow_pickle=True)
-                    if "states" in d and "actions" in d:
-                        il_count += 1
-                except Exception:
-                    pass
-            stats["il_episodes"] = il_count
-        
-        poses_dir = data_dir / "poses"
-        if poses_dir.exists():
-            stats["poses"] = len(list(poses_dir.glob("*.npz")))
-        
-        # DB에서 업로드된 개수 확인
-        conn = get_db_connection()
-        if conn:
-            try:
-                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
-                stats["uploaded"] = cur.fetchone()[0]
-            except:
-                pass
-            finally:
-                conn.close()
     except Exception:
         pass
-    
     return stats
 
 
@@ -1204,10 +1201,33 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         }
         
         function startAutoRefresh() {
+            // SSE (Server-Sent Events) 기반 실시간 업데이트
+            const progressSource = new EventSource(`${API_BASE}/api/stream/progress`);
+            progressSource.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (currentPage === 'overview') {
+                        // 진행률 업데이트
+                        const stageEl = document.getElementById('current-stage');
+                        if (stageEl && data.stage) stageEl.textContent = data.stage;
+                        const pctEl = document.getElementById('progress-pct');
+                        if (pctEl && data.percent !== undefined) pctEl.textContent = data.percent + '%';
+                    }
+                } catch(e) {}
+            };
+            progressSource.onerror = function() {
+                // SSE 연결 실패 시 폴링 폴백
+                progressSource.close();
+                refreshInterval = setInterval(() => {
+                    if (currentPage === 'overview') refreshData();
+                    else if (currentPage === 'jobs') refreshJobs();
+                }, 5000);
+            };
+            // 통계는 30초 간격 폴링 (빈도 낮춤)
             refreshInterval = setInterval(() => {
                 if (currentPage === 'overview') refreshData();
                 else if (currentPage === 'jobs') refreshJobs();
-            }, 5000);
+            }, 30000);
         }
         
         async function refreshData() {
@@ -2244,24 +2264,29 @@ def api_pipeline_stats():
 
 @app.route("/api/videos")
 def api_videos():
-    """비디오 목록 (DB 기반)"""
+    """비디오 목록 (DB 기반, 페이지네이션 지원)"""
     status_filter = request.args.get("status", "")
-    
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = min(200, max(1, request.args.get("per_page", 50, type=int)))
+    offset = (page - 1) * per_page
+
     conn = get_db_connection()
     if not conn:
-        return jsonify({"videos": [], "total": 0})
-    
+        return jsonify({"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0})
+
     try:
+        params: list = []
+        where = ""
         if status_filter:
-            cur = conn.execute(
-                "SELECT id, video_id, title, duration, status, file_size FROM videos WHERE status = ? ORDER BY id DESC LIMIT 100",
-                (status_filter,)
-            )
-        else:
-            cur = conn.execute(
-                "SELECT id, video_id, title, duration, status, file_size FROM videos ORDER BY id DESC LIMIT 100"
-            )
-        
+            where = "WHERE status = ?"
+            params.append(status_filter)
+
+        cur = conn.execute(
+            f"SELECT id, video_id, title, duration, status, file_size "
+            f"FROM videos {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        )
+
         videos = []
         for row in cur.fetchall():
             videos.append({
@@ -2270,16 +2295,23 @@ def api_videos():
                 "title": row["title"],
                 "duration": row["duration"],
                 "status": row["status"],
-                "size_mb": row["file_size"] / (1024 * 1024) if row["file_size"] else None
+                "size_mb": row["file_size"] / (1024 * 1024) if row["file_size"] else None,
             })
-        
-        cur = conn.execute("SELECT COUNT(*) FROM videos")
-        total = cur.fetchone()[0]
-        
+
+        count_cur = conn.execute(f"SELECT COUNT(*) FROM videos {where}", params)
+        total = count_cur.fetchone()[0]
+        total_pages = (total + per_page - 1) // per_page
+
         conn.close()
-        return jsonify({"videos": videos, "total": total})
+        return jsonify({
+            "items": videos,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+        })
     except Exception as e:
-        return jsonify({"videos": [], "total": 0, "error": str(e)})
+        return jsonify({"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0, "error": str(e)})
 
 
 @app.route("/api/videos/files")
@@ -2399,24 +2431,69 @@ def api_delete_video(video_id):
 
 @app.route("/api/episodes")
 def api_episodes():
-    """에피소드 목록"""
+    """에피소드 목록 (DB 기반 페이지네이션)"""
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = min(200, max(1, request.args.get("per_page", 50, type=int)))
+
+    # DB 기반 쿼리 우선
+    conn = get_db_connection()
+    if conn:
+        try:
+            offset = (page - 1) * per_page
+            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status IN ('processed','uploaded')")
+            total = cur.fetchone()[0]
+            total_pages = (total + per_page - 1) // per_page
+
+            cur = conn.execute(
+                "SELECT video_id, title, status, created_at "
+                "FROM videos WHERE status IN ('processed','uploaded') "
+                "ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                (per_page, offset)
+            )
+            episodes = []
+            for row in cur.fetchall():
+                episodes.append({
+                    "filename": f"{row['video_id']}_episode.npz",
+                    "video_id": row["video_id"],
+                    "title": row["title"] if "title" in row.keys() else "",
+                    "status": row["status"],
+                    "created": row["created_at"] or "",
+                })
+            conn.close()
+            return jsonify({"items": episodes, "total": total, "page": page,
+                           "per_page": per_page, "total_pages": total_pages})
+        except Exception:
+            conn.close()
+
+    # 폴백: 파일시스템
     episodes_dir = PROJECT_ROOT / "data" / "episodes"
     if not episodes_dir.exists():
-        return jsonify([])
-    
+        return jsonify({"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0})
+
+    all_npz = sorted(episodes_dir.glob("*.npz"), key=lambda x: x.stat().st_mtime, reverse=True)
+    total = len(all_npz)
+    total_pages = (total + per_page - 1) // per_page
+    offset = (page - 1) * per_page
+    page_files = all_npz[offset:offset + per_page]
+
     episodes = []
-    for f in sorted(episodes_dir.glob("*.npz"), key=lambda x: x.stat().st_mtime, reverse=True)[:100]:
+    for f in page_files:
         stat = f.stat()
-        # video_id 추출 (파일명에서)
         video_id = f.stem.split("_")[0] if "_" in f.stem else f.stem
         episodes.append({
             "filename": f.name,
             "video_id": video_id,
-            "size_mb": stat.st_size / (1024 * 1024),
-            "created": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            "size_mb": round(stat.st_size / (1024 * 1024), 2),
+            "created": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
         })
-    
-    return jsonify(episodes)
+
+    return jsonify({
+        "items": episodes,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": total_pages,
+    })
 
 
 @app.route("/api/episodes/<filename>/download")
@@ -2975,8 +3052,23 @@ def api_versions():
     episodes_dir = PROJECT_ROOT / "data" / "episodes"
     
     versions = []
-    if episodes_dir.exists():
-        npz_count = len(list(episodes_dir.glob("*.npz")))
+    # DB 기반 통계
+    conn = get_db_connection()
+    npz_count = 0
+    if conn:
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status IN ('processed','uploaded')")
+            npz_count = cur.fetchone()[0]
+            conn.close()
+        except Exception:
+            conn.close()
+            episodes_dir = PROJECT_ROOT / "data" / "episodes"
+            if episodes_dir.exists():
+                npz_count = len(list(episodes_dir.glob("*.npz")))
+    else:
+        episodes_dir = PROJECT_ROOT / "data" / "episodes"
+        if episodes_dir.exists():
+            npz_count = len(list(episodes_dir.glob("*.npz")))
         versions.append({
             "dataset_name": "p-ade-robot-arm",
             "version": "1.0.0",
@@ -3072,6 +3164,298 @@ def api_health():
         "redis": get_redis_client() is not None,
         "gpu": get_gpu_utilization() > 0,
     })
+
+
+# =========================================================================
+# D1-2: 실시간 진행률 SSE
+# =========================================================================
+
+@app.route("/api/stream/progress")
+def api_stream_progress():
+    """
+    실시간 파이프라인 진행률 스트리밍 (Server-Sent Events)
+    Redis pub/sub 'pade:progress' 채널 구독
+    """
+    import time as _time
+
+    def event_stream():
+        r = get_redis_client()
+        if not r:
+            yield "data: {\"error\": \"Redis 연결 실패\"}\n\n"
+            return
+
+        pubsub = r.pubsub()
+        pubsub.subscribe("pade:progress")
+        try:
+            while True:
+                message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    data = message["data"]
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8", errors="replace")
+                    yield f"data: {data}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+                _time.sleep(0.2)
+        except GeneratorExit:
+            pass
+        finally:
+            pubsub.unsubscribe("pade:progress")
+            pubsub.close()
+
+    from flask import Response
+    return Response(event_stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# =========================================================================
+# D1-3: 로그 레벨 필터링 + 다운로드
+# =========================================================================
+
+@app.route("/api/stream/logs/filtered")
+def api_stream_logs_filtered():
+    """
+    로그 레벨 필터링 SSE 스트리밍
+    ?level=INFO,WARNING,ERROR
+    ?keyword=검색어
+    """
+    import time as _time
+
+    level_filter = request.args.get("level", "").upper().split(",")
+    level_filter = [lv.strip() for lv in level_filter if lv.strip()]
+    keyword = request.args.get("keyword", "").strip()
+
+    def event_stream():
+        r = get_redis_client()
+        if not r:
+            yield "data: [ERROR] Redis 연결 실패\n\n"
+            return
+
+        pubsub = r.pubsub()
+        pubsub.subscribe("pade:logs")
+        try:
+            while True:
+                message = pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
+                if message and message["type"] == "message":
+                    data = message["data"]
+                    if isinstance(data, bytes):
+                        data = data.decode("utf-8", errors="replace")
+                    # 레벨 필터
+                    if level_filter:
+                        if not any(lv in data.upper() for lv in level_filter):
+                            continue
+                    # 키워드 필터
+                    if keyword and keyword.lower() not in data.lower():
+                        continue
+                    yield f"data: {data}\n\n"
+                else:
+                    yield ": heartbeat\n\n"
+                _time.sleep(0.1)
+        except GeneratorExit:
+            pass
+        finally:
+            pubsub.unsubscribe("pade:logs")
+            pubsub.close()
+
+    from flask import Response
+    return Response(event_stream(), mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.route("/api/logs/download")
+def api_download_logs():
+    """로그 파일 다운로드 (특정 run_id 또는 최신 로그)"""
+    run_id = request.args.get("run_id", "")
+    logs_dir = PROJECT_ROOT / "logs"
+    if not logs_dir.exists():
+        return jsonify({"error": "로그 디렉토리 없음"}), 404
+
+    # 로그 파일 취합
+    log_files = sorted(logs_dir.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)
+    if not log_files:
+        return jsonify({"error": "로그 파일 없음"}), 404
+
+    combined = []
+    for lf in log_files[:5]:
+        try:
+            content = lf.read_text(encoding="utf-8", errors="replace")
+            if run_id and run_id not in content:
+                continue
+            combined.append(f"=== {lf.name} ===\n{content}")
+        except Exception:
+            pass
+
+    if not combined:
+        return jsonify({"error": "해당 로그 없음"}), 404
+
+    from flask import Response
+    text = "\n\n".join(combined)
+    return Response(
+        text,
+        mimetype="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="pade_logs_{run_id or "latest"}.txt"'},
+    )
+
+
+# =========================================================================
+# D2-1: 실행 이력 API
+# =========================================================================
+
+@app.route("/api/runs")
+def api_runs():
+    """전체 실행 이력 (페이지네이션)"""
+    page = max(1, request.args.get("page", 1, type=int))
+    per_page = min(100, max(1, request.args.get("per_page", 20, type=int)))
+    offset = (page - 1) * per_page
+    status_filter = request.args.get("status", "")
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"runs": [], "total": 0})
+
+    try:
+        params: list = []
+        where = ""
+        if status_filter:
+            where = "WHERE status = ?"
+            params.append(status_filter)
+
+        cur = conn.execute(
+            f"SELECT * FROM pipeline_runs {where} ORDER BY started_at DESC LIMIT ? OFFSET ?",
+            params + [per_page, offset],
+        )
+        cols = [desc[0] for desc in cur.description] if cur.description else []
+        runs = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+        count_cur = conn.execute(f"SELECT COUNT(*) FROM pipeline_runs {where}", params)
+        total = count_cur.fetchone()[0]
+
+        conn.close()
+        return jsonify({"runs": runs, "total": total, "page": page, "per_page": per_page})
+    except Exception as e:
+        return jsonify({"runs": [], "total": 0, "error": str(e)})
+
+
+@app.route("/api/runs/<run_id>")
+def api_run_detail(run_id):
+    """특정 실행 상세"""
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"error": "DB 연결 실패"}), 500
+
+    try:
+        cur = conn.execute("SELECT * FROM pipeline_runs WHERE run_id = ?", (run_id,))
+        cols = [desc[0] for desc in cur.description] if cur.description else []
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            return jsonify({"error": "Run 없음"}), 404
+
+        run_data = dict(zip(cols, row))
+
+        # jobs history 파일에서 해당 run_id 정보 찾기
+        jobs_file = PROJECT_ROOT / "data" / "jobs_history.json"
+        stages = {}
+        if jobs_file.exists():
+            try:
+                with open(jobs_file, "r", encoding="utf-8") as f:
+                    jobs = json.load(f)
+                for job in jobs:
+                    if job.get("started_at", "").startswith(run_id[:8]) or job.get("run_id") == run_id:
+                        for stage in job.get("stages", []):
+                            stages[stage.get("stage", "unknown")] = {
+                                "duration": stage.get("elapsed_sec", 0),
+                                "count": stage.get("count", 0),
+                                "errors": stage.get("errors", 0),
+                            }
+            except Exception:
+                pass
+
+        run_data["stages"] = stages
+        return jsonify(run_data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =========================================================================
+# D2-2: 중복 방지 통계 API
+# =========================================================================
+
+@app.route("/api/dedup/stats")
+def api_dedup_stats():
+    """중복 방지 통계"""
+    conn = get_db_connection()
+    result = {
+        "total_collected": 0,
+        "unique_videos": 0,
+        "duplicate_blocked": 0,
+        "duplicate_rate": 0.0,
+        "rejected_count": 0,
+        "by_platform": {},
+    }
+
+    if conn:
+        try:
+            cur = conn.execute("SELECT COUNT(*) FROM video_registry")
+            result["total_collected"] = cur.fetchone()[0]
+
+            cur = conn.execute("SELECT COUNT(DISTINCT video_id) FROM video_registry")
+            result["unique_videos"] = cur.fetchone()[0]
+
+            result["duplicate_blocked"] = result["total_collected"] - result["unique_videos"]
+            if result["total_collected"] > 0:
+                result["duplicate_rate"] = round(
+                    result["duplicate_blocked"] / result["total_collected"] * 100, 1
+                )
+
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM video_registry WHERE status = 'rejected'"
+            )
+            result["rejected_count"] = cur.fetchone()[0]
+
+            cur = conn.execute(
+                "SELECT platform, COUNT(*) as cnt FROM video_registry "
+                "WHERE platform IS NOT NULL GROUP BY platform"
+            )
+            for row in cur.fetchall():
+                result["by_platform"][row[0]] = row[1]
+
+            conn.close()
+        except Exception as e:
+            result["error"] = str(e)
+
+    return jsonify(result)
+
+
+@app.route("/api/registry/search")
+def api_registry_search():
+    """비디오 레지스트리 검색"""
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "q 파라미터 필요"}), 400
+
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({"found": False, "error": "DB 연결 실패"})
+
+    try:
+        cur = conn.execute(
+            "SELECT video_id, url, status, collected_at, quality_score, "
+            "rejection_reason, s3_path FROM video_registry WHERE video_id = ?",
+            (q,),
+        )
+        row = cur.fetchone()
+        conn.close()
+
+        if not row:
+            return jsonify({"found": False})
+
+        cols = ["video_id", "url", "status", "collected_at", "quality_score",
+                "rejection_reason", "s3_path"]
+        return jsonify({"found": True, **dict(zip(cols, row))})
+    except Exception as e:
+        return jsonify({"found": False, "error": str(e)})
 
 
 def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = False,

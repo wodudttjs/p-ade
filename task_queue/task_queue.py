@@ -157,19 +157,49 @@ class CrawlTaskQueue:
         self._client.hincrby(self.STATS_KEY, "total_results", len(results))
     
     def mark_failed(self, keyword: str, error: str, source: str = "youtube"):
-        """작업 실패 마킹"""
+        """작업 실패 마킹 + Dead Letter Queue 기록"""
         if not self._connected:
             return
         
         key = f"{source}:{keyword}"
-        self._client.hset(self.RESULTS_KEY, key, json.dumps({
+        fail_payload = json.dumps({
             "keyword": keyword,
             "source": source,
             "error": error,
             "failed_at": time.time(),
-        }))
+        })
+        self._client.hset(self.RESULTS_KEY, key, fail_payload)
+        
+        # Dead Letter Queue에 실패 작업 추가
+        dlq_key = f"pade:dlq:{self.QUEUE_KEY}"
+        self._client.lpush(dlq_key, fail_payload)
         
         self._client.hincrby(self.STATS_KEY, "total_failed", 1)
+    
+    def get_dlq(self, limit: int = 100) -> List[Dict]:
+        """Dead Letter Queue 조회"""
+        if not self._connected:
+            return []
+        dlq_key = f"pade:dlq:{self.QUEUE_KEY}"
+        items = self._client.lrange(dlq_key, 0, limit - 1)
+        return [json.loads(item) for item in items]
+    
+    def retry_dlq(self, count: int = 0) -> int:
+        """DLQ 항목을 다시 큐에 넣기. count=0이면 전체"""
+        if not self._connected:
+            return 0
+        dlq_key = f"pade:dlq:{self.QUEUE_KEY}"
+        total = self._client.llen(dlq_key)
+        to_retry = total if count == 0 else min(count, total)
+        retried = 0
+        for _ in range(to_retry):
+            item = self._client.rpop(dlq_key)
+            if item is None:
+                break
+            data = json.loads(item)
+            self.push(data.get("keyword", ""), data.get("source", "youtube"))
+            retried += 1
+        return retried
     
     # =========================================================================
     # 상태 조회

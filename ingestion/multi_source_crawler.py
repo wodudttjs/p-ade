@@ -358,7 +358,7 @@ class MultiSourceCrawler:
         max_duration_sec: int = MAX_DURATION_SEC,
         content_filter: bool = True,
         use_cache: bool = True,  # 캐시 사용 여부
-        async_mode: bool = False,  # 비동기 모드 사용 여부
+        async_mode: bool = True,  # 비동기 모드 사용 여부 (기본: True)
     ):
         self.sources = sources or ["youtube", "google_videos"]
         self.max_results = max_results
@@ -553,6 +553,21 @@ class MultiSourceCrawler:
                     break
 
         stats.elapsed_sec = time.time() - start_time
+
+        # ── Registry 기반 중복 제거 (DB 수준) ──
+        try:
+            from cache.video_registry import GlobalVideoRegistry
+            registry = GlobalVideoRegistry()
+            before_count = len(all_results)
+            new_ids = registry.filter_new_only([cr.video_id for cr in all_results])
+            all_results = [cr for cr in all_results if cr.video_id in new_ids]
+            removed = before_count - len(all_results)
+            if removed > 0:
+                logger.info(f"Registry 중복 제거: {removed}개 제외, {len(all_results)}개 신규")
+                stats.total_duplicates += removed
+        except Exception as e:
+            logger.debug(f"Registry 필터링 스킵: {e}")
+
         logger.info(stats.summary())
 
         return all_results, stats

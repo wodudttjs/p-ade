@@ -6,6 +6,7 @@ Redis에 실시간 통계를 저장하여 대시보드에서 조회할 수 있�
 
 import sys
 import time
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional, Dict
@@ -22,7 +23,7 @@ except ImportError:
 
 
 class StatsCollector:
-    """통계 수집기"""
+    """통계 수집기 (D3-2: 메트릭 수집 강화)"""
     
     def __init__(self, host: str = "localhost", port: int = 6379):
         self.r = None
@@ -91,6 +92,113 @@ class StatsCollector:
         
         # 품질 등급별 카운트는 evaluator에서 직접 업데이트
         pass
+
+    # ─── D3-2: 신규 메트릭 5개 ────────────────────────────────────────────────
+
+    def collect_disk_usage(self):
+        """디스크 사용량 수집 (1분마다)"""
+        if not self.r:
+            return
+        try:
+            raw_dir = PROJECT_ROOT / "data" / "raw"
+            episodes_dir = PROJECT_ROOT / "data" / "episodes"
+
+            usage = shutil.disk_usage(str(PROJECT_ROOT))
+            gb = 1024 ** 3
+
+            raw_size = sum(f.stat().st_size for f in raw_dir.glob("*") if f.is_file()) if raw_dir.exists() else 0
+            ep_size = sum(f.stat().st_size for f in episodes_dir.glob("*") if f.is_file()) if episodes_dir.exists() else 0
+
+            pipe = self.r.pipeline()
+            pipe.hset("pade:stats:disk", "total_gb", f"{usage.total / gb:.1f}")
+            pipe.hset("pade:stats:disk", "used_gb", f"{usage.used / gb:.1f}")
+            pipe.hset("pade:stats:disk", "free_gb", f"{usage.free / gb:.1f}")
+            pipe.hset("pade:stats:disk", "raw_gb", f"{raw_size / gb:.2f}")
+            pipe.hset("pade:stats:disk", "episodes_gb", f"{ep_size / gb:.2f}")
+            pipe.expire("pade:stats:disk", 86400)
+            pipe.execute()
+        except Exception:
+            pass
+
+    def collect_download_speed(self):
+        """다운로드 속도 수집 (10초마다, 5분 이동 평균)"""
+        if not self.r:
+            return
+        try:
+            curr = int(self.r.get("pade:download_count") or 0)
+            prev = self._prev_values.get("dl_speed_prev", curr)
+            speed = (curr - prev) * 6  # 10초 간격 → 분당
+            self._prev_values["dl_speed_prev"] = curr
+
+            # 시계열 저장 (LPUSH + LTRIM)
+            self.r.lpush("pade:stats:download_speed", speed)
+            self.r.ltrim("pade:stats:download_speed", 0, 29)  # 최근 30개 (5분)
+            self.r.expire("pade:stats:download_speed", 86400)
+        except Exception:
+            pass
+
+    def collect_duplicate_rate(self):
+        """중복률 수집 (1분마다)"""
+        if not self.r:
+            return
+        try:
+            total = int(self.r.hget("pade:crawl_stats", "total_completed") or 0)
+            dupes = int(self.r.hget("pade:crawl_stats", "total_duplicates") or 0)
+            rate = (dupes / total * 100) if total > 0 else 0.0
+
+            self.r.lpush("pade:stats:duplicate_rate", f"{rate:.1f}")
+            self.r.ltrim("pade:stats:duplicate_rate", 0, 59)  # 최근 60개 (1시간)
+            self.r.expire("pade:stats:duplicate_rate", 86400)
+        except Exception:
+            pass
+
+    def collect_gpu_memory(self):
+        """GPU별 VRAM 수집 (10초마다)"""
+        if not self.r:
+            return
+        try:
+            output = subprocess.check_output([
+                'nvidia-smi',
+                '--query-gpu=index,memory.used,memory.total,utilization.gpu',
+                '--format=csv,noheader,nounits'
+            ], stderr=subprocess.DEVNULL)
+
+            pipe = self.r.pipeline()
+            for line in output.decode().strip().split('\n'):
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) >= 4:
+                    idx, used, total, util = parts[0], parts[1], parts[2], parts[3]
+                    pipe.hset("pade:stats:gpu", f"gpu{idx}_vram_used_mb", used)
+                    pipe.hset("pade:stats:gpu", f"gpu{idx}_vram_total_mb", total)
+                    pipe.hset("pade:stats:gpu", f"gpu{idx}_util_percent", util)
+            pipe.expire("pade:stats:gpu", 86400)
+            pipe.execute()
+        except Exception:
+            pass
+
+    def collect_queue_depth(self):
+        """큐 깊이 수집 (30초마다)"""
+        if not self.r:
+            return
+        try:
+            pipe = self.r.pipeline()
+
+            # 크롤링 큐
+            crawl_q = self.r.llen("pade:queue:crawl") or 0
+            pipe.hset("pade:stats:queues", "crawl", crawl_q)
+
+            # 다운로드 큐
+            dl_q = self.r.llen("pade:queue:download") or self.r.llen("pade:download_queue") or 0
+            pipe.hset("pade:stats:queues", "download", dl_q)
+
+            # 처리 큐
+            proc_q = self.r.llen("pade:queue:process") or 0
+            pipe.hset("pade:stats:queues", "process", proc_q)
+
+            pipe.expire("pade:stats:queues", 86400)
+            pipe.execute()
+        except Exception:
+            pass
     
     def update_collected_today(self):
         """오늘 수집량 업데이트"""
@@ -129,20 +237,38 @@ class StatsCollector:
             return {"used": 0, "total": 0}
     
     def run(self, interval_sec: float = 1.0):
-        """수집 루프 실행"""
-        print(f"📊 통계 수집 시작 (간격: {interval_sec}초)")
+        """수집 루프 실행 (D3-2: 차등 간격 스케줄링)"""
+        print(f"📊 통계 수집 시작 (기본 간격: {interval_sec}초)")
         
         if not self.r:
             print("❌ Redis 연결 실패")
             return
         
+        tick = 0
         while True:
             try:
+                # 매 틱 (1초): 기존 수집
                 self.collect_crawl_stats()
                 self.collect_download_stats()
                 self.collect_processing_stats()
                 self.collect_gpu_stats()
                 self.update_collected_today()
+                
+                # 10초마다: download_speed, gpu_memory
+                if tick % 10 == 0:
+                    self.collect_download_speed()
+                    self.collect_gpu_memory()
+                
+                # 30초마다: queue_depth
+                if tick % 30 == 0:
+                    self.collect_queue_depth()
+                
+                # 60초마다: disk_usage, duplicate_rate
+                if tick % 60 == 0:
+                    self.collect_disk_usage()
+                    self.collect_duplicate_rate()
+                
+                tick += 1
                 
             except Exception as e:
                 print(f"수집 오류: {e}")

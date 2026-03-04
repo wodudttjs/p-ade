@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--no-db-update", action="store_true", help="DB 업데이트 스킵")
     parser.add_argument("--prefix", type=str, help="S3 키 접두어 (기본: 입력 폴더명)")
     parser.add_argument("--from-db", action="store_true", help="DB에 등록된 episodes만 업로드")
+    parser.add_argument("--delete-local", action="store_true", help="업로드 성공 후 로컬 파일 삭제")
     args = parser.parse_args()
 
     input_path = Path(args.input)
@@ -67,6 +68,18 @@ def main():
 
             if not args.no_db_update:
                 upload_to_s3.update_database(results)
+
+            # --delete-local: 업로드 성공 후 로컬 파일 삭제
+            if args.delete_local:
+                deleted = 0
+                for file_path, result in zip(files, results):
+                    if getattr(result, 'success', False) and file_path.exists():
+                        try:
+                            file_path.unlink()
+                            deleted += 1
+                        except OSError as e:
+                            print(f"⚠️ 삭제 실패: {file_path} - {e}")
+                print(f"🗑️ 로컬 파일 {deleted}개 삭제 완료")
         finally:
             session.close()
     else:
@@ -82,6 +95,17 @@ def main():
 
         sys.argv = argv
         upload_to_s3.main()
+
+        # --delete-local: 업로드 성공 후 로컬 파일/디렉토리 삭제
+        if args.delete_local and input_path.exists():
+            import shutil
+            if input_path.is_dir():
+                shutil.rmtree(input_path, ignore_errors=True)
+                print(f"🗑️ 로컬 디렉토리 삭제: {input_path}")
+            else:
+                input_path.unlink(missing_ok=True)
+                print(f"🗑️ 로컬 파일 삭제: {input_path}")
+
     return 0
 
 

@@ -497,6 +497,56 @@ class KeywordGenerator:
         )
         return sorted_kw[:n]
 
+    def get_low_performing_keywords(
+        self,
+        min_searches: int = 3,
+        max_yield_rate: float = 0.05,
+    ) -> List[str]:
+        """
+        성과 낮은 키워드 식별 (Task A3-2)
+
+        Args:
+            min_searches: 최소 검색 횟수 (이 횟수 이상 사용된 키워드만 대상)
+            max_yield_rate: 최대 수율 (found/search_count 기준, 이 이하면 비활성화 대상)
+
+        Returns:
+            비활성화 대상 키워드 리스트
+        """
+        low_perf = []
+        for kw, stats in self._keyword_stats.items():
+            searches = stats.get("search_count", 0)
+            found = stats.get("total_found", 0)
+            if searches >= min_searches:
+                yield_rate = found / searches if searches > 0 else 0
+                if yield_rate < max_yield_rate:
+                    low_perf.append(kw)
+        return low_perf
+
+    def deactivate_low_performers(
+        self,
+        min_searches: int = 3,
+        max_yield_rate: float = 0.05,
+    ) -> List[str]:
+        """
+        성과 낮은 키워드 자동 비활성화 (Task A3-2)
+
+        비활성화된 키워드는 다음 generate_all() 호출 시 제외됩니다.
+
+        Returns:
+            비활성화된 키워드 리스트
+        """
+        low_perf = self.get_low_performing_keywords(min_searches, max_yield_rate)
+        for kw in low_perf:
+            kw_lower = kw.lower().strip()
+            self._used_keywords.add(kw_lower)  # _used_keywords에 추가하여 중복 제거 시 걸러짐
+            EXCLUDE_TERMS.add(kw_lower)  # EXCLUDE_TERMS에 추가하여 향후 제외
+        if low_perf:
+            logger.info(
+                f"🔕 성과 낮은 키워드 {len(low_perf)}개 비활성화: "
+                f"{low_perf[:5]}{'...' if len(low_perf) > 5 else ''}"
+            )
+        return low_perf
+
     def suggest_new_keywords(self, existing_titles: List[str]) -> List[str]:
         """기존 수집 영상 제목에서 새 키워드 추출 (간단한 TF 기반)"""
         from collections import Counter
