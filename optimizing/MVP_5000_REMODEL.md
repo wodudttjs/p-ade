@@ -12,7 +12,7 @@
 | **Crawl** | 50 키워드, 4 workers, sync 모드 | 키워드 부족 + 동기식 크롤링 | 동일 키워드 반복 → 중복 URL 폭증 |
 | **Download** | 6 workers, 720p, timeout 600s | yt-dlp 단일 프로세스 병목 | 5,000개 순차 다운로드 시 ~14시간 |
 | **Detect** | GPU 3-Stream, batch 4 | VRAM 9GB 제한, FPS 5.0 고정 | 5,000개 처리 시 ~17시간 (현재 6,254초/1,012개) |
-| **Build IL** | 순차 or GPU 3-Stream | MediaPipe CPU 바운드 | 5,000개 시 ~10시간 |
+| **Build IL** | 순차 or GPU 3-Stream | ~~MediaPipe CPU 바운드~~ → RTMPose GPU ONNX로 해결 | Detect+IL 통합 1-Pass 처리 |
 | **Quality** | 순차 평가, 48.8% 통과율 | 통과율 낮아 2배 이상 크롤 필요 | 10,000+ 크롤 → 5,000 통과 필요 |
 | **Upload** | 순차 S3 업로드 | 단일 스레드 업로드 | 5,000 NPZ 업로드 ~2시간 |
 | **중복 방지** | CSV stem 비교 (현재 실행 내) | **실행 간(cross-run) 중복 체크 없음** | 2회차부터 동일 영상 대량 재수집 |
@@ -181,29 +181,36 @@ class GlobalVideoRegistry:
 | Detect+IL | 별도 스테이지 | **Detect → IL 파이프라인 통합** (1-pass) |
 | 메모리 관리 | `torch.cuda.empty_cache()` | **프레임 단위 스트리밍 + 명시적 GC** |
 
-**핵심 변경: Detect+IL 통합 1-Pass 처리**
+**핵심 변경: Detect+IL 통합 1-Pass 처리 (RTMPose WholeBody GPU)**
 
 현재 문제: Detect(YOLO)로 NPZ 저장 → Build IL(MediaPipe)로 다시 읽어 처리 = **2번 비디오 디코딩**
 
-해결: 비디오 1회 디코딩 → YOLO + MediaPipe 동시 처리 → NPZ 1회 저장
+해결: 비디오 1회 디코딩 → YOLOX(사람검출) + DWPose(WholeBody 133 keypoints) GPU 동시 처리 → NPZ 1회 저장
+
+> **⚠️ 포즈 프레임워크 마이그레이션 완료**:
+> MediaPipe (CPU, 33 keypoints) → **RTMPose WholeBody (GPU ONNX, 133 keypoints)**
+> - body: 17 COCO keypoints → State dim 103, Action dim 52
+> - hand: 21 × 2 → 그리퍼 열림/닫힘 추정
+> - `torch` 사전 임포트로 cuDNN 9 DLL 자동 로딩
+> - 핵심 모듈: `extraction/rtmpose_wholebody.py`
 
 ```
 파일: gpu/unified_processor.py (신규)
 
 class UnifiedVideoProcessor:
     """
-    1-Pass 통합 처리: 비디오 → (YOLO + MediaPipe) → State-Action NPZ
+    1-Pass 통합 처리: 비디오 → (YOLOX + DWPose WholeBody) → State-Action NPZ
 
     기존 2단계를 1단계로 통합:
       AS-IS: detect(video→npz) + build_il(video→npz) = 2x 비디오 디코딩
-      TO-BE: unified(video→npz) = 1x 비디오 디코딩
+      TO-BE: unified(video→npz) = 1x 비디오 디코딩 (GPU 가속)
 
     예상 성능 개선: 처리 시간 ~40% 단축
     """
 
     def process(self, video_path, output_dir):
         # 1. cv2로 비디오 1회 디코딩 (프레임 스트리밍)
-        # 2. 각 프레임에 YOLO + MediaPipe 동시 적용
+        # 2. 각 프레임에 YOLOX + DWPose GPU 동시 적용
         # 3. Detection + Pose + State-Action 통합 NPZ 저장
 ```
 
@@ -232,7 +239,7 @@ class CPUWorkerPool:
     GPU 3-Stream에서 긴 영상이 병목이 되지 않도록 분리.
 
     - ProcessPoolExecutor(max_workers=CPU_COUNT // 2)
-    - MediaPipe CPU 모드
+    - RTMPose ONNX CPU 모드 (CPUExecutionProvider 폴백)
     - 15fps 다운샘플링
     """
 ```

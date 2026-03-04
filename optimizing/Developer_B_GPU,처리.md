@@ -57,11 +57,20 @@ AS-IS (2-Pass):
   비디오 → MediaPipe → NPZ 저장
   = 비디오 2회 디코딩
 
-TO-BE (1-Pass):
-  비디오 → (YOLO + MediaPipe) → NPZ 1회 저장
-  = 비디오 1회 디코딩
+TO-BE (1-Pass, RTMPose WholeBody):
+  비디오 → YOLOX(사람검출) + DWPose(WholeBody 133 keypoints) → NPZ 1회 저장
+  = 비디오 1회 디코딩, GPU 가속
 
 예상 효과: 처리 시간 40% 단축
+
+⚠️ 포즈 프레임워크 마이그레이션 (완료):
+  MediaPipe (CPU, 33 keypoints) → RTMPose WholeBody (GPU ONNX, 133 keypoints)
+  - body: 17 COCO keypoints (shoulder/elbow/wrist 포함)
+  - hand: 21 × 2 (그리퍼 열림/닫힘 추정용)
+  - YOLOX + DWPose ONNX 2-모델 구조
+  - CUDAExecutionProvider (torch import로 cuDNN 9 DLL 사전 로딩)
+  - 검증 파일: extraction/rtmpose_wholebody.py, tests/test_rtmpose_pipeline.py
+
 구현 단계:
 1. 통합 프로세서 클래스 설계
 클래스: UnifiedVideoProcessor
@@ -72,11 +81,11 @@ TO-BE (1-Pass):
 핵심 로직:
 1. cv2로 비디오 열기
 2. 각 프레임 순회:
-   - YOLO 추론 (객체 검출)
-   - MediaPipe 추론 (포즈 추출)
-   - State-Action 계산
+   - YOLOX 추론 (사람 검출, grid decoding)
+   - DWPose 추론 (WholeBody 133 keypoints, SimCC 디코딩)
+   - State-Action 계산 (COCO 17 기준)
 3. 통합 NPZ 저장
-2. YOLO + MediaPipe 동시 추론
+2. YOLOX + DWPose 동시 추론 (GPU)
 주의사항:
 - 두 모델 모두 GPU 사용
 - VRAM 관리 필수
@@ -88,10 +97,13 @@ TO-BE (1-Pass):
 3. NPZ 포맷 통합
 unified_npz 구조:
 {
-  'detections': [...],      # YOLO 결과
-  'poses': [...],           # MediaPipe 결과
-  'states': [...],          # State 인코딩
-  'actions': [...],         # Action 인코딩
+  'detections': [...],      # YOLOX 결과
+  'poses': [...],           # RTMPose WholeBody COCO 17 body
+  'left_hand': [...],       # 왼손 21 keypoints
+  'right_hand': [...],      # 오른손 21 keypoints
+  'states': [...],          # State 인코딩 [T, 103]
+  'actions': [...],         # Action 인코딩 [T-1, 52]
+  'gripper_state': [...],   # 그리퍼 상태 [T]
   'metadata': {...}
 }
 검증:
@@ -187,7 +199,7 @@ CPU 멀티프로세스로 별도 처리
 1. CPUWorkerPool 클래스
 구조:
 - ProcessPoolExecutor(max_workers=CPU_COUNT // 2)
-- MediaPipe CPU 모드
+- RTMPose ONNX CPU 모드 (YOLOX + DWPose, CPUExecutionProvider)
 - 15fps 다운샘플링
 2. StreamManager 연동
 로직:
@@ -256,6 +268,10 @@ rejected 영상 Registry 등록
 📊 Developer B 최종 체크리스트
 필수 완료 항목
 
+ ✅ MediaPipe → RTMPose WholeBody 마이그레이션 (GPU ONNX)
+ ✅ YOLOX grid decoding 수정 + cuDNN 9 DLL 사전 로딩
+ ✅ State/Action 인코딩 COCO 17 keypoints 리팩터링 (S:103, A:52)
+ ✅ 전체 파이프라인 통합 테스트 통과 (20f, 0.76s, GPU)
  UnifiedVideoProcessor 구현 및 테스트
  Detect+IL 통합 1-Pass 처리
  Dual-GPU 6-Stream 지원

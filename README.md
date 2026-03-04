@@ -1,11 +1,13 @@
 # P-ADE (Physical AI Data Engine)
 
-웹 비디오 자원을 자동 수집하여 로봇 학습용 (State, Action) 데이터셋으로 변환하는 End-to-End 파이프라인
+웹 비디오 자원을 자동 수집하여 SO-101 로봇팔 모방학습용 (State, Action) 데이터셋으로 변환하는 End-to-End 파이프라인
 
 ## 🎯 프로젝트 개요
 
 - **목표**: 웹에서 로봇팔/2족보행 동작 비디오를 자동 발견하고, 로봇이 모방학습 가능한 형태로 변환하여 클라우드에 저장
 - **핵심 가치**: 데이터 부족 해결, 완전 자동화, 클라우드 네이티브 확장성, 24/7 무인 운영
+- **포즈 추출**: RTMPose WholeBody (DWPose) — ONNX Runtime GPU 추론
+- **대상 로봇**: SO-101 로봇팔 6DOF (shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper)
 
 ## 🏗️ 시스템 아키텍처
 
@@ -14,17 +16,17 @@
               │                                                      │
 [Crawl] → [Download] → [Detect] → [Build IL] → [Quality] → [Upload]
    │          │            │           │            │           │
-   ├── YouTube          ├── GPU       ├── MediaPipe ├── 5-dim  ├── S3
-   ├── Google Videos    │  3-Stream   │  Tasks API  │  scoring  │  SHA256
-   ├── Redis 캐시       │  CUDA       │  States +   │  A~F 등급 │  dedup
-   └── Multi-source     └── CPU       │  Actions    └── Redis   └── Multipart
+   ├── YouTube          ├── GPU       ├── RTMPose   ├── 5-dim  ├── S3
+   ├── Google Videos    │  3-Stream   │  WholeBody  │  scoring  │  SHA256
+   ├── Redis 캐시       │  CUDA       │  (DWPose)   │  A~F 등급 │  dedup
+   └── Multi-source     └── CPU       │  ONNX GPU   └── Redis   └── Multipart
        (keyword expansion)  fallback   └── NPZ 저장    cache
 
    ※ 실패한 단계가 있어도 기존 데이터로 다음 단계 계속 진행
    ※ 서버가 켜져 있으면 30초 간격으로 무한 반복 실행
 ```
 
-## ✅ 구현 완료 기능 (v2.1.0)
+## ✅ 구현 완료 기능 (v3.0.0 — RTMPose MVP)
 
 ### 🔍 1단계: 크롤링 (Crawl)
 - **다국어 키워드 생성기** (`ingestion/keyword_generator.py`)
@@ -48,7 +50,7 @@
   - 720p 품질, 30초~20분 필터링
 
 ### 🔍 3단계: 객체 검출 (Detect)
-- **YOLO + MediaPipe 파이프라인** (`extraction/detect_to_episodes.py`)
+- **YOLO 파이프라인** (`extraction/detect_to_episodes.py`)
   - YOLOv8 기반 프레임 단위 객체 검출 (**GPU cuda:0 사용**)
   - 바운딩 박스, 신뢰도 점수 추출
   - 에피소드 단위 NPZ 저장
@@ -57,16 +59,22 @@
   - VRAM 자동 관리 (9GB 제한), CPU 폴백
   - 긴 영상 자동 FPS 조절 (>60초 → 15fps)
 
-### 📦 4단계: 모방학습 데이터 생성 (Build IL)
-- **모방학습 데이터 생성** (`scripts/pipeline/build_imitation_data.py`)
-  - MediaPipe Tasks API 기반 비디오 → 포즈 추출
-  - 33개 관절 + 21개 손 랜드마크 추출
-  - State-Action 인코딩 (state_dim=199, action_dim=100)
+### 📦 4단계: 모방학습 데이터 생성 (Build IL) — RTMPose WholeBody
+- **포즈 추출** (`extraction/rtmpose_wholebody.py`)
+  - **RTMPose WholeBody (DWPose)** ONNX Runtime GPU 추론
+  - YOLOX 사람 검출 → RTMPose 133 keypoints (body 17 + foot 6 + face 68 + hands 42)
+  - CUDAExecutionProvider 우선, CPU 자동 폴백
+  - 싱글턴 패턴으로 모델 재로딩 방지
+- **모방학습 데이터 인코딩** (`scripts/pipeline/build_imitation_data.py`)
+  - COCO 17 관절 + 21개 × 2 손 랜드마크 추출
+  - SO-101 로봇팔 관절 매핑 (어깨/팔꿈치/손목)
+  - State-Action 인코딩 (state_dim=103, action_dim=52)
   - 그리퍼(손 오므림) 상태 자동 추정
   ```
-  states:       [T, 199]    # 관절위치(99) + 속도(99) + 신뢰도(1)
-  actions:      [T-1, 100]  # 관절 delta(99) + gripper(1)
-  poses:        [T, 33, 3]  # 정규화된 관절 좌표
+  states:       [T, 103]    # 관절위치(51) + 속도(51) + 신뢰도(1)
+  actions:      [T-1, 52]   # 관절 delta(51) + gripper(1)
+  poses:        [T, 17, 3]  # COCO 17 정규화 관절 좌표
+  velocity:     [T, 17, 3]  # 관절 속도
   left_hand:    [T, 21, 3]  # 왼손 랜드마크
   right_hand:   [T, 21, 3]  # 오른손 랜드마크
   gripper_state:[T]          # 그리퍼 상태 (0=열림, 1=닫힘)
@@ -117,7 +125,7 @@ p-ade-master/
 ├── scripts/                   # 파이프라인 스크립트
 │   └── pipeline/
 │       ├── parallel_download.py   # 병렬 다운로드 (yt-dlp)
-│       ├── build_imitation_data.py # 모방학습 데이터 생성
+│       ├── build_imitation_data.py # 모방학습 데이터 생성 (RTMPose WholeBody)
 │       ├── upload_to_s3.py        # S3 업로드
 │       ├── collect_youtube.py     # YouTube 수집
 │       ├── encode_actions.py      # 액션 인코딩
@@ -125,15 +133,21 @@ p-ade-master/
 │       ├── filter_quality.py      # 품질 필터
 │       └── segment_episodes.py    # 에피소드 분할
 │
+├── extraction/                # 포즈 추출 & 객체 검출
+│   ├── rtmpose_wholebody.py       # 🆕 RTMPose WholeBody (DWPose) ONNX GPU
+│   ├── detect_to_episodes.py      # YOLO 검출 → NPZ (GPU)
+│   ├── object_detector.py         # YOLOv8 래퍼
+│   └── pose_estimator.py          # (레거시 MediaPipe 래퍼)
+│
+├── models/                    # ONNX / PT 모델 파일 (.gitignore)
+│   └── rtmpose/
+│       ├── dwpose_wholebody.onnx  # RTMPose WholeBody (133 keypoints)
+│       └── yolox_l.onnx           # YOLOX-L 사람 검출
+│
 ├── ingestion/                 # 크롤링 및 키워드
 │   ├── keyword_generator.py       # 다국어 키워드 생성
 │   ├── multi_source_crawler.py    # 멀티소스 크롤러 + Redis 캐시
 │   └── downloader.py              # 다운로드 매니저
-│
-├── extraction/                # 객체 검출 및 에피소드 생성
-│   ├── detect_to_episodes.py      # YOLO 검출 → NPZ (GPU)
-│   ├── object_detector.py         # YOLOv8 래퍼
-│   └── pose_estimator.py          # MediaPipe 래퍼
 │
 ├── quality/                   # 품질 평가
 │   └── evaluator.py               # 5-dim 품질 평가 + A~F 등급
@@ -170,7 +184,9 @@ p-ade-master/
 │   └── settings.py                # 환경변수 로드
 │
 ├── tests/                     # 테스트
-│   └── ... (28개 테스트 파일)
+│   ├── test_full_pipeline.py      # RTMPose 전체 파이프라인 통합 테스트
+│   ├── test_rtmpose_pipeline.py   # RTMPose 단위 테스트
+│   └── ... (기타 테스트 파일)
 │
 ├── deploy/                    # 배포 설정
 │   ├── docker-compose.yml         # Docker Compose
@@ -187,11 +203,20 @@ p-ade-master/
 
 ## 🚀 빠른 시작
 
-### 설치
+### 1. 설치
 
 ```bash
 # 패키지 설치
 pip install -r requirements.txt
+
+# ONNX 모델 다운로드 (RTMPose WholeBody)
+mkdir -p models/rtmpose
+# DWPose WholeBody (133 keypoints)
+wget -O models/rtmpose/dwpose_wholebody.onnx \
+  https://huggingface.co/yzd-v/DWPose/resolve/main/dw-ll_ucoco_384.onnx
+# YOLOX-L (사람 검출)
+wget -O models/rtmpose/yolox_l.onnx \
+  https://huggingface.co/yzd-v/DWPose/resolve/main/yolox_l.onnx
 
 # PostgreSQL 설치 & 설정
 sudo apt install -y postgresql postgresql-contrib
@@ -206,7 +231,7 @@ sudo systemctl start redis
 sudo systemctl enable redis
 ```
 
-### 환경설정
+### 2. 환경설정
 
 ```bash
 # .env 파일 생성 (.env.example 참고)
@@ -231,18 +256,27 @@ AWS_REGION=us-east-1
 AWS_S3_BUCKET=p-ade-datasets
 ```
 
-### 3. 서버 모드 실행 (권장)
+### 3. 파이프라인 테스트
+
+```bash
+# RTMPose GPU 파이프라인 테스트
+PYTHONUNBUFFERED=1 python3 tests/test_full_pipeline.py
+
+# 전체 테스트 실행
+pytest tests/ -v
+```
+
+### 4. 서버 모드 실행 (권장)
 
 ```bash
 # 웹 대시보드 + 자동 파이프라인 무한 반복
 # crawl → download → detect → build_il → quality → upload → 30초 대기 → 반복
-source venv/bin/activate
 python main.py serve --target 500 --port 5000
 
 # 대시보드 접속: http://localhost:5000
 ```
 
-### 4. 단일 실행
+### 5. 단일 실행
 
 ```bash
 # 파이프라인 1회 실행
@@ -281,29 +315,37 @@ python main.py run-forever --target 500
 
 ## 📁 데이터 포맷
 
-### 모방학습 Episode NPZ 구조
+### 모방학습 Episode NPZ 구조 (RTMPose WholeBody → SO-101)
 ```python
 import numpy as np
 data = np.load('episode.npz', allow_pickle=True)
 
-data['states']        # [T, 199]   - 관절위치(99) + 속도(99) + 신뢰도(1)
-data['actions']       # [T-1, 100] - 관절 delta(99) + gripper(1)
-data['poses']         # [T, 33, 3] - 정규화된 관절 좌표
+data['states']        # [T, 103]   - 관절위치(51) + 속도(51) + 신뢰도(1)
+data['actions']       # [T-1, 52]  - 관절 delta(51) + gripper(1)
+data['poses']         # [T, 17, 3] - COCO 17 정규화 관절 좌표
+data['velocity']      # [T, 17, 3] - 관절 속도
 data['left_hand']     # [T, 21, 3] - 왼손 랜드마크
 data['right_hand']    # [T, 21, 3] - 오른손 랜드마크
 data['gripper_state'] # [T]        - 그리퍼 상태 (0=열림, 1=닫힘)
 data['confidence']    # [T]        - 포즈 검출 신뢰도
-data['velocity']      # [T, 33, 3] - 관절 속도
 data['video_id']      # str        - 원본 비디오 ID
 data['fps']           # float      - 추출 FPS
+```
+
+### COCO 17 Keypoint 인덱스
+```
+ 0=nose, 1=L_eye, 2=R_eye, 3=L_ear, 4=R_ear,
+ 5=L_shoulder, 6=R_shoulder, 7=L_elbow, 8=R_elbow,
+ 9=L_wrist, 10=R_wrist, 11=L_hip, 12=R_hip,
+13=L_knee, 14=R_knee, 15=L_ankle, 16=R_ankle
 ```
 
 ### 빠른 사용 예시
 ```python
 # 모방학습 학습 루프
 data = np.load('data/episodes/video_episode.npz', allow_pickle=True)
-states = data['states']    # [T, 199]
-actions = data['actions']  # [T-1, 100]
+states = data['states']    # [T, 103]
+actions = data['actions']  # [T-1, 52]
 
 for t in range(len(actions)):
     state = states[t]      # 현재 상태
@@ -318,15 +360,17 @@ for t in range(len(actions)):
 |------|------|
 | **언어** | Python 3.13+ |
 | **크롤링** | yt-dlp 2026.2, aiohttp, requests |
-| **AI/ML** | YOLOv8 (ultralytics 8.4), MediaPipe Tasks, PyTorch 2.7 |
-| **GPU** | CUDA 3-Stream 병렬 (듀얼 GPU), CPU 폴백 |
-| **데이터** | NumPy, Polars, SciPy, h5py |
+| **포즈 추출** | RTMPose WholeBody (DWPose) — ONNX Runtime GPU 1.24 |
+| **객체 검출** | YOLOv8 (ultralytics 8.4), YOLOX-L (ONNX) |
+| **GPU** | CUDA 12.6, PyTorch 2.7, CUDA 3-Stream 병렬 (듀얼 GPU), CPU 폴백 |
+| **데이터** | NumPy 2.2, Polars 1.38, SciPy 1.17, h5py |
 | **클라우드** | AWS S3 (boto3) |
 | **DB** | PostgreSQL 14 (SQLAlchemy 2.0) |
-| **큐/캐시** | Redis 6+ |
+| **큐/캐시** | Redis 7+ |
 | **웹 UI** | Flask 3.1, Bootstrap 5, 실시간 로그 |
+| **로봇 ML** | LeRobot 0.3.4, HuggingFace Hub, Diffusers |
 | **모니터링** | loguru, psutil, GPU/VRAM 모니터 |
-| **테스트** | pytest |
+| **테스트** | pytest 9.0 |
 
 ## 🖥️ 시스템 요구사항
 
@@ -336,7 +380,8 @@ for t in range(len(actions)):
 | **Python** | 3.13+ |
 | **PostgreSQL** | 14+ |
 | **Redis** | 6+ |
-| **GPU** | CUDA 지원 GPU (선택, CPU 폴백 가능) |
+| **GPU** | NVIDIA CUDA 12.x 지원 GPU (RTX 3060+, RTMPose ONNX GPU 추론) |
+| **VRAM** | 6GB+ (RTMPose + YOLOX 동시 로드) |
 | **RAM** | 16GB+ |
 | **디스크** | 100GB+ (영상 다운로드/처리용) |
 

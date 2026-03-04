@@ -139,23 +139,27 @@ class ActionEncoder:
         return velocity
     
     def normalize_poses(self, poses: np.ndarray) -> np.ndarray:
-        """포즈 정규화 (hip 중심, scale 정규화)"""
-        # Hip center (MediaPipe: 23=left_hip, 24=right_hip)
-        if poses.shape[1] >= 25:
+        """포즈 정규화 (hip 중심, scale 정규화) — COCO 17 / MediaPipe 33 모두 지원"""
+        J = poses.shape[1]
+        
+        if J <= 17:
+            # COCO 17: 11=left_hip, 12=right_hip, 5=L_shoulder, 6=R_shoulder
+            hip_center = (poses[:, 11, :] + poses[:, 12, :]) / 2
+            normalized = poses - hip_center[:, np.newaxis, :]
+            shoulder_width = np.linalg.norm(poses[:, 5, :] - poses[:, 6, :], axis=1)
+        elif J >= 25:
+            # MediaPipe 33: 23=left_hip, 24=right_hip, 11=L_shoulder, 12=R_shoulder
             hip_center = (poses[:, 23, :] + poses[:, 24, :]) / 2
+            normalized = poses - hip_center[:, np.newaxis, :]
+            shoulder_width = np.linalg.norm(poses[:, 11, :] - poses[:, 12, :], axis=1)
         else:
             hip_center = np.mean(poses, axis=1)
-        
-        # 중심 이동
-        normalized = poses - hip_center[:, np.newaxis, :]
+            normalized = poses - hip_center[:, np.newaxis, :]
+            shoulder_width = np.ones(poses.shape[0])
         
         # Scale 정규화 (어깨 너비 기준)
-        if poses.shape[1] >= 12:
-            shoulder_width = np.linalg.norm(
-                poses[:, 11, :] - poses[:, 12, :], axis=1
-            )
-            scale = np.clip(shoulder_width, 0.1, 2.0)
-            normalized = normalized / scale[:, np.newaxis, np.newaxis]
+        scale = np.clip(shoulder_width, 0.01, 2.0)
+        normalized = normalized / scale[:, np.newaxis, np.newaxis]
         
         return normalized
     

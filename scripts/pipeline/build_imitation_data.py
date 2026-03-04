@@ -1,14 +1,27 @@
 #!/usr/bin/env python3
 """
-모방학습 데이터 생성 파이프라인
+모방학습 데이터 생성 파이프라인 (SO-101 로봇팔용)
 
-비디오 → 포즈 추출(MediaPipe Tasks API) → State-Action 인코딩 → .npz 저장
+비디오 → 포즈 추출(RTMPose WholeBody GPU) → State-Action 인코딩 → .npz 저장
+
+RTMPose WholeBody 출력 (133 keypoints):
+  - body:  17 keypoints (COCO format) — 어깨/팔꿈치/손목 포함
+  - hand:  21 × 2 keypoints — 그리퍼 열림/닫힘 추정용
+
+SO-101 로봇팔 6DOF:
+  shoulder_pan, shoulder_lift, elbow_flex, wrist_flex, wrist_roll, gripper
+
+COCO 17 Keypoint 인덱스:
+  0=nose, 1=L_eye, 2=R_eye, 3=L_ear, 4=R_ear,
+  5=L_shoulder, 6=R_shoulder, 7=L_elbow, 8=R_elbow,
+  9=L_wrist, 10=R_wrist, 11=L_hip, 12=R_hip,
+  13=L_knee, 14=R_knee, 15=L_ankle, 16=R_ankle
 
 생성되는 데이터 구조:
-  - states:       [T, state_dim]   정규화된 관절 위치 + 속도
-  - actions:      [T-1, action_dim] 프레임 간 위치 변화(delta)
-  - poses:        [T, 33, 3]       정규화된 관절 좌표
-  - velocity:     [T, 33, 3]       관절 속도
+  - states:       [T, 103]         정규화된 관절 위치(51) + 속도(51) + 신뢰도(1)
+  - actions:      [T-1, 52]        프레임 간 위치 변화(51) + 그리퍼(1)
+  - poses:        [T, 17, 3]       정규화된 관절 좌표 (COCO 17)
+  - velocity:     [T, 17, 3]       관절 속도
   - left_hand:    [T, 21, 3]       왼손 랜드마크
   - right_hand:   [T, 21, 3]       오른손 랜드마크
   - timestamps:   [T]              타임스탬프
@@ -33,156 +46,25 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # ============================================================================
-# MediaPipe 포즈 추출 (Tasks API - 0.10.x)
+# RTMPose WholeBody 포즈 추출 (GPU 가속, MediaPipe 대체)
 # ============================================================================
 
 def extract_pose_from_video(video_path: str, output_fps: float = 5.0, max_frames: int = None):
     """
-    MediaPipe Tasks API로 비디오에서 포즈+손 추출
-    
+    RTMPose WholeBody (DWPose) GPU로 비디오에서 포즈+손 추출
+
     Returns:
-        dict with body[T,33,3], body_world[T,33,3],
+        dict with body[T,17,3], body_world[T,17,3],
              left_hand[T,21,3], right_hand[T,21,3],
              timestamps[T], confidence[T], fps
     """
-    import mediapipe as mp
-    from mediapipe.tasks.python import vision
-    from mediapipe.tasks.python.core import base_options as mp_base
+    from extraction.rtmpose_wholebody import RTMPoseVideoExtractor
 
-    model_path = str(PROJECT_ROOT / "models" / "mediapipe" / "pose_landmarker.task")
-    hand_model_path = str(PROJECT_ROOT / "models" / "mediapipe" / "hand_landmarker.task")
+    # 싱글턴 패턴 — 모델 재로딩 방지
+    if not hasattr(extract_pose_from_video, "_extractor"):
+        extract_pose_from_video._extractor = RTMPoseVideoExtractor(device="gpu")
 
-    # --- Pose Landmarker ---
-    pose_options = vision.PoseLandmarkerOptions(
-        base_options=mp_base.BaseOptions(model_asset_path=model_path),
-        running_mode=vision.RunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.5,
-        min_tracking_confidence=0.5,
-        output_segmentation_masks=False,
-    )
-    pose_landmarker = vision.PoseLandmarker.create_from_options(pose_options)
-
-    # --- Hand Landmarker ---
-    hand_landmarker = None
-    if Path(hand_model_path).exists():
-        hand_options = vision.HandLandmarkerOptions(
-            base_options=mp_base.BaseOptions(model_asset_path=hand_model_path),
-            running_mode=vision.RunningMode.VIDEO,
-            num_hands=2,
-            min_hand_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        hand_landmarker = vision.HandLandmarker.create_from_options(hand_options)
-
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Cannot open video: {video_path}")
-
-    orig_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_interval = max(1, int(orig_fps / output_fps))
-
-    body_list = []
-    body_world_list = []
-    left_hand_list = []
-    right_hand_list = []
-    timestamps = []
-    confidences = []
-
-    frame_idx = 0
-    processed = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % frame_interval != 0:
-            frame_idx += 1
-            continue
-
-        if max_frames and processed >= max_frames:
-            break
-
-        timestamp_ms = int((frame_idx / orig_fps) * 1000)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-
-        # 포즈 검출
-        try:
-            pose_result = pose_landmarker.detect_for_video(mp_image, timestamp_ms)
-        except Exception:
-            frame_idx += 1
-            continue
-
-        # 포즈 데이터 추출
-        if pose_result.pose_landmarks and len(pose_result.pose_landmarks) > 0:
-            lms = pose_result.pose_landmarks[0]
-            body = np.array([[l.x, l.y, l.z] for l in lms])
-            conf = np.mean([l.visibility for l in lms]) if hasattr(lms[0], 'visibility') else 0.5
-        else:
-            body = np.zeros((33, 3))
-            conf = 0.0
-
-        # 월드 좌표
-        if pose_result.pose_world_landmarks and len(pose_result.pose_world_landmarks) > 0:
-            wlms = pose_result.pose_world_landmarks[0]
-            body_w = np.array([[l.x, l.y, l.z] for l in wlms])
-        else:
-            body_w = np.zeros((33, 3))
-
-        # 손 검출
-        lh = np.zeros((21, 3))
-        rh = np.zeros((21, 3))
-        if hand_landmarker:
-            try:
-                hand_result = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
-                if hand_result.hand_landmarks:
-                    for i, hand_lms in enumerate(hand_result.hand_landmarks):
-                        hand_arr = np.array([[l.x, l.y, l.z] for l in hand_lms])
-                        # handedness 확인
-                        if hand_result.handedness and i < len(hand_result.handedness):
-                            label = hand_result.handedness[i][0].category_name.lower()
-                            if label == 'left':
-                                lh = hand_arr
-                            else:
-                                rh = hand_arr
-                        else:
-                            if i == 0:
-                                rh = hand_arr
-                            else:
-                                lh = hand_arr
-            except Exception:
-                pass
-
-        body_list.append(body)
-        body_world_list.append(body_w)
-        left_hand_list.append(lh)
-        right_hand_list.append(rh)
-        timestamps.append(frame_idx / orig_fps)
-        confidences.append(conf)
-
-        frame_idx += 1
-        processed += 1
-
-    cap.release()
-    pose_landmarker.close()
-    if hand_landmarker:
-        hand_landmarker.close()
-
-    if not body_list:
-        return None
-
-    return {
-        "body": np.array(body_list, dtype=np.float32),           # [T, 33, 3]
-        "body_world": np.array(body_world_list, dtype=np.float32), # [T, 33, 3]
-        "left_hand": np.array(left_hand_list, dtype=np.float32),   # [T, 21, 3]
-        "right_hand": np.array(right_hand_list, dtype=np.float32), # [T, 21, 3]
-        "timestamps": np.array(timestamps, dtype=np.float32),      # [T]
-        "confidence": np.array(confidences, dtype=np.float32),     # [T]
-        "fps": output_fps,
-    }
+    return extract_pose_from_video._extractor.extract(video_path, output_fps, max_frames)
 
 
 # ============================================================================
@@ -190,15 +72,25 @@ def extract_pose_from_video(video_path: str, output_fps: float = 5.0, max_frames
 # ============================================================================
 
 def normalize_poses(poses: np.ndarray) -> np.ndarray:
-    """포즈 정규화: hip 중심, 어깨 너비 scale"""
-    # Hip center (23=left_hip, 24=right_hip)
-    hip_center = (poses[:, 23, :] + poses[:, 24, :]) / 2
-    normalized = poses - hip_center[:, np.newaxis, :]
+    """
+    포즈 정규화: hip 중심, 어깨 너비 scale
+
+    COCO 17 keypoints (RTMPose WholeBody):
+        0=nose, 1=L_eye, 2=R_eye, 3=L_ear, 4=R_ear,
+        5=L_shoulder, 6=R_shoulder, 7=L_elbow, 8=R_elbow,
+        9=L_wrist, 10=R_wrist, 11=L_hip, 12=R_hip,
+        13=L_knee, 14=R_knee, 15=L_ankle, 16=R_ankle
+    """
+    # Hip center (COCO: 11=left_hip, 12=right_hip)
+    hip_center = (poses[:, 11, :2] + poses[:, 12, :2]) / 2  # [T, 2]
+    # confidence 채널은 정규화하지 않음
+    normalized = poses.copy()
+    normalized[:, :, :2] = poses[:, :, :2] - hip_center[:, np.newaxis, :]
     
-    # 어깨 너비 기준 스케일링
-    shoulder_width = np.linalg.norm(poses[:, 11, :] - poses[:, 12, :], axis=1)
+    # 어깨 너비 기준 스케일링 (COCO: 5=L_shoulder, 6=R_shoulder)
+    shoulder_width = np.linalg.norm(poses[:, 5, :2] - poses[:, 6, :2], axis=1)
     scale = np.clip(shoulder_width, 0.01, 2.0)
-    normalized = normalized / scale[:, np.newaxis, np.newaxis]
+    normalized[:, :, :2] = normalized[:, :, :2] / scale[:, np.newaxis, np.newaxis]
     
     return normalized
 
@@ -253,13 +145,15 @@ def build_states(norm_poses: np.ndarray, velocity: np.ndarray,
                  confidence: np.ndarray) -> np.ndarray:
     """
     State 벡터 생성: [관절위치 flat | 관절속도 flat | 신뢰도]
+    COCO 17 keypoints × 3 channels = 51 per component
+    → state_dim = 51 + 51 + 1 = 103
     """
     T = norm_poses.shape[0]
-    pos_flat = norm_poses.reshape(T, -1)    # [T, 99]
-    vel_flat = velocity.reshape(T, -1)      # [T, 99]
+    pos_flat = norm_poses.reshape(T, -1)    # [T, 17*3=51]
+    vel_flat = velocity.reshape(T, -1)      # [T, 17*3=51]
     conf = confidence.reshape(T, 1)          # [T, 1]
     
-    states = np.concatenate([pos_flat, vel_flat, conf], axis=1)  # [T, 199]
+    states = np.concatenate([pos_flat, vel_flat, conf], axis=1)  # [T, 103]
     return states.astype(np.float32)
 
 
@@ -268,25 +162,26 @@ def build_actions(norm_poses: np.ndarray, fps: float,
     """
     Action 벡터 생성: [관절위치 delta flat | gripper_state]
     delta = (pose[t+1] - pose[t]) * fps
+    COCO 17 keypoints × 3 channels = 51 + 1(gripper) = 52
     """
     T = norm_poses.shape[0]
     
     # 위치 변화량
-    delta = np.diff(norm_poses, axis=0) * fps  # [T-1, 33, 3]
-    delta_flat = delta.reshape(T - 1, -1)       # [T-1, 99]
+    delta = np.diff(norm_poses, axis=0) * fps  # [T-1, 17, 3]
+    delta_flat = delta.reshape(T - 1, -1)       # [T-1, 51]
     
     # 그리퍼 상태 (t+1 기준)
     grip = gripper[1:].reshape(T - 1, 1)
     
-    actions = np.concatenate([delta_flat, grip], axis=1)  # [T-1, 100]
+    actions = np.concatenate([delta_flat, grip], axis=1)  # [T-1, 52]
     return actions.astype(np.float32)
 
 
 def encode_imitation_data(pose_data: dict, video_id: str) -> dict:
     """포즈 데이터 → 모방학습 데이터 인코딩"""
-    body = pose_data["body"]           # [T, 33, 3]
+    body = pose_data["body"]           # [T, 17, 3]
     body_world = pose_data["body_world"]
-    left_hand = pose_data["left_hand"]
+    left_hand = pose_data["left_hand"]  # [T, 21, 3]
     right_hand = pose_data["right_hand"]
     timestamps = pose_data["timestamps"]
     confidence = pose_data["confidence"]
@@ -313,14 +208,14 @@ def encode_imitation_data(pose_data: dict, video_id: str) -> dict:
     
     return {
         # 핵심 모방학습 데이터
-        "states": states,                          # [T, 199]
-        "actions": actions,                        # [T-1, 100]
+        "states": states,                          # [T, 103]
+        "actions": actions,                        # [T-1, 52]
         
         # 원시 포즈 데이터
-        "poses": norm_poses.astype(np.float32),    # [T, 33, 3]
-        "poses_raw": body.astype(np.float32),      # [T, 33, 3]
+        "poses": norm_poses.astype(np.float32),    # [T, 17, 3]
+        "poses_raw": body.astype(np.float32),      # [T, 17, 3]
         "poses_world": body_world.astype(np.float32),
-        "velocity": velocity.astype(np.float32),   # [T, 33, 3]
+        "velocity": velocity.astype(np.float32),   # [T, 17, 3]
         
         # 손 데이터
         "left_hand": left_hand.astype(np.float32), # [T, 21, 3]

@@ -80,3 +80,8 @@ temp/
 mediapipe_resources/
 vendor/
 yolov8n.pt
+
+# Model weights (too large for git)
+*.onnx
+*.pt
+models/rtmpose/

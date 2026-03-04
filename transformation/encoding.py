@@ -17,6 +17,7 @@ from transformation.spec import (
     StateSpec,
     ActionSpec,
     MEDIAPIPE_LANDMARKS,
+    COCO_LANDMARKS,
 )
 
 logger = setup_logger(__name__)
@@ -165,10 +166,16 @@ class ActionComputer:
     Task 4.2.2: Action Computation
     
     Position delta, Rotation delta, Gripper state 계산
+    MediaPipe 33 / COCO 17 keypoints 모두 지원
     """
     
-    LEFT_WRIST = MEDIAPIPE_LANDMARKS["LEFT_WRIST"]
-    RIGHT_WRIST = MEDIAPIPE_LANDMARKS["RIGHT_WRIST"]
+    # MediaPipe (legacy)
+    LEFT_WRIST_MP = MEDIAPIPE_LANDMARKS["LEFT_WRIST"]   # 15
+    RIGHT_WRIST_MP = MEDIAPIPE_LANDMARKS["RIGHT_WRIST"] # 16
+    
+    # COCO 17 (RTMPose)
+    LEFT_WRIST_COCO = COCO_LANDMARKS["LEFT_WRIST"]   # 9
+    RIGHT_WRIST_COCO = COCO_LANDMARKS["RIGHT_WRIST"] # 10
     
     def __init__(
         self,
@@ -178,6 +185,12 @@ class ActionComputer:
         self.config = config or TransformConfig()
         self.action_spec = action_spec or ActionSpec()
         self.eps = 1e-8
+    
+    def _get_wrist_indices(self, num_joints: int) -> tuple:
+        """keypoint 수에 따라 wrist 인덱스 자동 선택"""
+        if num_joints <= 17:
+            return self.LEFT_WRIST_COCO, self.RIGHT_WRIST_COCO
+        return self.LEFT_WRIST_MP, self.RIGHT_WRIST_MP
         
     def compute_action(
         self,
@@ -200,6 +213,8 @@ class ActionComputer:
             masks: [T-1] 유효 마스크
         """
         T = pose.shape[0]
+        J = pose.shape[1]
+        lw, rw = self._get_wrist_indices(J)
         action_parts = []
         
         # 1. Position delta
@@ -207,8 +222,8 @@ class ActionComputer:
             if self.action_spec.eef_only:
                 # EEF만 (양손 손목)
                 eef_pos = np.stack([
-                    pose[:, self.LEFT_WRIST],
-                    pose[:, self.RIGHT_WRIST],
+                    pose[:, lw],
+                    pose[:, rw],
                 ], axis=1)  # [T, 2, 3]
                 delta_pos = eef_pos[1:] - eef_pos[:-1]  # [T-1, 2, 3]
             else:
@@ -243,8 +258,8 @@ class ActionComputer:
         else:
             # 기본: EEF position delta
             eef_pos = np.stack([
-                pose[:, self.LEFT_WRIST],
-                pose[:, self.RIGHT_WRIST],
+                pose[:, lw],
+                pose[:, rw],
             ], axis=1)
             actions = (eef_pos[1:] - eef_pos[:-1]).reshape(T - 1, -1)
             
