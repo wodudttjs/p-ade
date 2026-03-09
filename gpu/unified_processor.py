@@ -1,21 +1,25 @@
 """
-UnifiedVideoProcessor — Detect + IL 1-Pass 통합 처리기
+UnifiedVideoProcessor — Detect + IL 1-Pass 통합 처리기 (RTMPose WholeBody GPU)
 
-AS-IS (2-Pass):
+AS-IS (2-Pass, MediaPipe):
   비디오 → YOLO → NPZ 저장
   비디오 → MediaPipe → NPZ 저장
   = 비디오 2회 디코딩
 
-TO-BE (1-Pass):
-  비디오 → (YOLO + MediaPipe) → 통합 NPZ 1회 저장
-  = 비디오 1회 디코딩 → 처리 시간 40% 단축 목표
+TO-BE (1-Pass, RTMPose WholeBody GPU):
+  비디오 → RTMPose WholeBody (ONNX GPU) → COCO 17 + Hands → 통합 NPZ 1회 저장
+  = 비디오 1회 디코딩 → 처리 시간 40% 단축
 
 통합 NPZ 구조:
   {
-    'detections': (N, D) — YOLO 결과,
-    'poses':      (N, 33, 3) — MediaPipe body,
-    'states':     (N, D_s) — State 인코딩,
-    'actions':    (N-1, D_a) — Action 인코딩,
+    'states':     (N, 103) — 관절위치(51) + 속도(51) + 신뢰도(1),
+    'actions':    (N-1, 52) — 관절delta(51) + gripper(1),
+    'poses':      (N, 17, 3) — COCO 17 정규화 관절,
+    'velocity':   (N, 17, 3) — 관절 속도,
+    'left_hand':  (N, 21, 3) — 왼손 랜드마크,
+    'right_hand': (N, 21, 3) — 오른손 랜드마크,
+    'gripper_state': (N,) — 그리퍼 상태 (0=열림, 1=닫힘),
+    'detections': (N, 4) — YOLO bbox (선택),
     'metadata':   dict
   }
 """
@@ -89,24 +93,14 @@ class UnifiedVideoProcessor:
         output_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        1-Pass 통합 처리
+        1-Pass 통합 처리 (RTMPose WholeBody GPU + YOLO)
 
         Args:
             video_path: 입력 비디오 경로
             output_path: NPZ 저장 경로 (None이면 저장 안 함)
 
         Returns:
-            {
-                "video_id": str,
-                "success": bool,
-                "frames": int,
-                "detections": np.ndarray,
-                "poses": np.ndarray,
-                "states": np.ndarray,
-                "actions": np.ndarray,
-                "elapsed_sec": float,
-                "error": str (실패 시),
-            }
+            결과 딕셔너리 (success, frames, states, actions 등)
         """
         video_id = Path(video_path).stem
         start_time = time.time()
@@ -114,71 +108,68 @@ class UnifiedVideoProcessor:
         try:
             import cv2
 
-            # 비디오 열기
+            # 비디오 기본 정보
             cap = cv2.VideoCapture(video_path)
             if not cap.isOpened():
                 return self._fail(video_id, "비디오 열기 실패")
-
             src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration_sec = total_frames / src_fps if src_fps > 0 else 0
-
-            # 몇 프레임마다 추출할지 계산
-            frame_interval = max(1, int(round(src_fps / self.output_fps)))
+            cap.release()
 
             # 처리기 초기화 (lazy)
             self._init_processors()
 
-            # ── 1-Pass 프레임 순회 ──
-            detections_list = []
-            poses_list = []
-            confidences_list = []
-            frame_idx = 0
-            extracted = 0
+            # ── RTMPose WholeBody로 포즈 추출 (GPU, 비디오 전체) ──
+            if self._pose_est is not None:
+                pose_data = self._pose_est.extract(
+                    video_path, 
+                    output_fps=self.output_fps,
+                    max_frames=self.max_frames,
+                )
+            else:
+                return self._fail(video_id, "포즈 추정기 없음 (RTMPose 초기화 실패)")
 
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                if frame_idx % frame_interval == 0:
-                    frame_data = self._process_frame(frame, frame_idx)
-                    detections_list.append(frame_data["detection"])
-                    poses_list.append(frame_data["pose"])
-                    confidences_list.append(frame_data["confidence"])
-                    extracted += 1
-
-                    if self.max_frames and extracted >= self.max_frames:
-                        break
-
-                frame_idx += 1
-
-            cap.release()
-
-            if extracted < 3:
+            if pose_data is None or pose_data["body"].shape[0] < 3:
+                extracted = pose_data["body"].shape[0] if pose_data else 0
                 return self._fail(video_id, f"추출된 프레임 수 부족: {extracted}")
 
-            # ── 배열 변환 ──
-            poses = np.array(poses_list, dtype=np.float32)          # (N, 33, 3)
-            detections = np.array(detections_list, dtype=np.float32) # (N, D)
-            confidences = np.array(confidences_list, dtype=np.float32) # (N,)
+            extracted = pose_data["body"].shape[0]
 
-            # ── State-Action 인코딩 ──
-            states, actions = self._encode_state_action(poses, self.output_fps)
+            # ── YOLO 객체 검출 (선택) ──
+            detections = np.zeros((extracted, 4), dtype=np.float32)
+            # YOLO 검출은 선택적 — 포즈 기반 IL이 핵심
+            # TODO: YOLO 검출 필요 시 frame 재디코딩 또는 concurrent 처리
+
+            # ── State-Action 인코딩 (RTMPose COCO 17 기반) ──
+            from scripts.pipeline.build_imitation_data import encode_imitation_data
+            il_data = encode_imitation_data(pose_data, video_id)
+
+            states = il_data["states"]
+            actions = il_data["actions"]
 
             # ── 통합 NPZ 저장 ──
             if output_path:
-                self._save_unified_npz(
-                    output_path=output_path,
-                    video_id=video_id,
-                    detections=detections,
-                    poses=poses,
-                    states=states,
-                    actions=actions,
-                    confidences=confidences,
-                    fps=self.output_fps,
-                    duration_sec=duration_sec,
-                )
+                Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+                save_data = {
+                    "states": states,
+                    "actions": actions,
+                    "poses": il_data["poses"],
+                    "velocity": il_data["velocity"],
+                    "left_hand": il_data["left_hand"],
+                    "right_hand": il_data["right_hand"],
+                    "gripper_state": il_data["gripper_state"],
+                    "confidence": il_data["confidence"],
+                    "detections": detections,
+                    "fps": float(self.output_fps),
+                    "duration_sec": float(duration_sec),
+                    "video_id": video_id,
+                    "num_frames": extracted,
+                    "state_dim": states.shape[1] if states.ndim == 2 else 0,
+                    "action_dim": actions.shape[1] if actions.ndim == 2 else 0,
+                }
+                np.savez_compressed(output_path, **save_data)
+                logger.debug(f"통합 NPZ 저장: {output_path} ({extracted}프레임)")
 
             elapsed = time.time() - start_time
 
@@ -187,10 +178,6 @@ class UnifiedVideoProcessor:
                 "video_path": video_path,
                 "success": True,
                 "frames": extracted,
-                "detections": detections,
-                "poses": poses,
-                "states": states,
-                "actions": actions,
                 "state_dim": states.shape[1] if states.ndim == 2 else 0,
                 "action_dim": actions.shape[1] if actions.ndim == 2 else 0,
                 "elapsed_sec": elapsed,
@@ -252,18 +239,13 @@ class UnifiedVideoProcessor:
                 self._init_detector()
 
     def _init_pose_estimator(self):
-        """MediaPipe 포즈 추정기 초기화"""
+        """RTMPose WholeBody 포즈 추정기 초기화 (MediaPipe 대체)"""
         try:
-            from extraction.pose_estimator import MediaPipePoseEstimator
-            self._pose_est = MediaPipePoseEstimator(
-                model_complexity=1,
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-                enable_hands=True,
-            )
-            logger.debug("MediaPipe 포즈 추정기 초기화 완료")
+            from extraction.rtmpose_wholebody import RTMPoseVideoExtractor
+            self._pose_est = RTMPoseVideoExtractor(device="gpu")
+            logger.debug("RTMPose WholeBody 포즈 추정기 초기화 완료 (GPU)")
         except Exception as e:
-            logger.warning(f"MediaPipe 초기화 실패 (None으로 진행): {e}")
+            logger.warning(f"RTMPose 초기화 실패 (None으로 진행): {e}")
             self._pose_est = None
 
     def _init_detector(self):

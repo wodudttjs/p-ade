@@ -73,15 +73,15 @@ class QualityConfig:
     pass_threshold: float = 50.0        # 통과 점수 (60 → 50으로 완화, 목표 통과율 65%)
     # Early Reject 기준
     early_reject_min_frames: int = 30   # 프레임 수 < 30 → 즉시 탈락
-    early_reject_min_confidence: float = 0.3  # 평균 confidence < 0.3 → 즉시 탈락
+    early_reject_min_confidence: float = 0.1  # RTMPose는 MediaPipe보다 confidence가 낮음 (0.3→0.1)
 
 
 class RobotArmQualityEvaluator:
     """
     로봇팔 영상 품질 평가자 — npz 에피소드 파일 기반
 
-    npz 데이터 구조:
-      - poses: numpy (N, 33, 3) — body landmarks (x, y, z 정규화 좌표)
+    npz 데이터 구조 (RTMPose WholeBody 기반):
+      - poses: numpy (N, 17, 3) — COCO 17 body keypoints (x, y, conf)
       - left_hand / right_hand: numpy (N, 21, 3) — hand landmarks
       - confidence: numpy (N,) — 프레임별 포즈 검출 신뢰도
       - gripper_state: numpy (N,) — 그리퍼 열림/닫힘 상태
@@ -95,12 +95,16 @@ class RobotArmQualityEvaluator:
       - 프레임 커버리지: 10점
     """
 
-    # MediaPipe body 랜드마크 인덱스 (33개 중)
+    # COCO 17 키포인트 인덱스 (RTMPose WholeBody 출력)
+    # 0: nose, 1: left_eye, 2: right_eye, 3: left_ear, 4: right_ear,
+    # 5: left_shoulder, 6: right_shoulder, 7: left_elbow, 8: right_elbow,
+    # 9: left_wrist, 10: right_wrist, 11: left_hip, 12: right_hip,
+    # 13: left_knee, 14: right_knee, 15: left_ankle, 16: right_ankle
     JOINT_INDICES = {
-        "shoulder": [11, 12],   # 양쪽 어깨
-        "elbow": [13, 14],      # 양쪽 팔꿈치
-        "wrist": [15, 16],      # 양쪽 손목
-        "gripper": [19, 20],    # 양쪽 검지 끝
+        "shoulder": [5, 6],     # 양쪽 어깨
+        "elbow": [7, 8],        # 양쪽 팔꿈치
+        "wrist": [9, 10],       # 양쪽 손목
+        "gripper": [9, 10],     # 손목을 gripper 프록시로 사용 (COCO 17에는 손가락 없음)
     }
 
     # 손가락 인덱스 (MediaPipe Hand, 21개 중)
@@ -213,7 +217,7 @@ class RobotArmQualityEvaluator:
         """npz NpzFile → evaluator 가 기대하는 sequence dict 변환"""
         seq: Dict[str, Any] = {}
 
-        # body poses: (N, 33, 3)
+        # body poses: (N, 17, 3) — COCO 17 (RTMPose) 또는 (N, 33, 3) — MediaPipe (레거시)
         poses = data.get("poses", data.get("body_landmarks", None))
         if poses is not None and isinstance(poses, np.ndarray) and poses.ndim == 3:
             seq["body"] = poses          # (N, 33, 3) numpy 배열 그대로
@@ -265,7 +269,7 @@ class RobotArmQualityEvaluator:
 
         Args:
             sequence: {
-                "body": np.ndarray (N, 33, 3) 또는 None,
+                "body": np.ndarray (N, 17, 3) 또는 (N, 33, 3),
                 "left_hand": np.ndarray (N, 21, 3) 또는 None,
                 "right_hand": np.ndarray (N, 21, 3) 또는 None,
                 "confidence": np.ndarray (N,) 또는 None,
@@ -362,7 +366,7 @@ class RobotArmQualityEvaluator:
         """
         4-DOF 관절 검출 평가 (30점 만점)
 
-        body: (N, 33, 3)
+        body: (N, 17, 3) — COCO 17 또는 (N, 33, 3) — MediaPipe
         confidence: (N,) — 프레임별 전체 신뢰도
         """
         detected: Dict[str, bool] = {joint: False for joint in self.JOINT_INDICES}
@@ -406,15 +410,16 @@ class RobotArmQualityEvaluator:
         """
         동작 품질 평가 (25점 만점)
 
-        body: (N, 33, 3)
+        body: (N, 17, 3) — COCO 17 또는 (N, 33, 3) — MediaPipe
         """
         if body.shape[0] < 2:
             return 0.0
 
-        # 손목(15,16) 좌표 추출 — 둘 중 움직임이 큰 쪽 사용
+        # 손목 인덱스: COCO 17 → [9, 10], MediaPipe → [15, 16]
+        wrist_indices = [10, 9] if body.shape[1] <= 17 else [16, 15]
         best_score = 0.0
 
-        for idx in [16, 15]:  # 오른손목, 왼손목
+        for idx in wrist_indices:
             if idx >= body.shape[1]:
                 continue
             wrist = body[:, idx, :]  # (N, 3)
@@ -529,16 +534,18 @@ class RobotArmQualityEvaluator:
         """
         안정성 평가 (15점 만점)
 
-        body: (N, 33, 3) — 어깨(11,12) 위치 변동으로 판단
+        body: (N, 17, 3) 또는 (N, 33, 3) — 어깨 위치 변동으로 판단
         좌표가 정규화(0~1)가 아닌 월드 좌표일 수 있으므로
         전체 좌표 범위 대비 상대적 안정성을 평가합니다.
         """
         if body.shape[0] < 5:
             return 0.0
 
-        # 양쪽 어깨 중점
-        left_sh = body[:, 11, :2]   # (N, 2) — x,y
-        right_sh = body[:, 12, :2]
+        # 양쪽 어깨 중점 (COCO 17: 5,6 / MediaPipe: 11,12)
+        sh_l = 5 if body.shape[1] <= 17 else 11
+        sh_r = 6 if body.shape[1] <= 17 else 12
+        left_sh = body[:, sh_l, :2]   # (N, 2) — x,y
+        right_sh = body[:, sh_r, :2]
         center = (left_sh + right_sh) / 2.0  # (N, 2)
 
         # 전부 0이면 검출 안 됨 → 중간 점수
@@ -578,7 +585,7 @@ class RobotArmQualityEvaluator:
         """
         프레임 커버리지 평가 (10점 만점)
 
-        body: (N, 33, 3)
+        body: (N, 17, 3) 또는 (N, 33, 3)
         confidence: (N,) 또는 None
         """
         n_frames = body.shape[0]

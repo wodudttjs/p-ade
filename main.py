@@ -380,7 +380,7 @@ def run_serve(
     """
     서버 모드: Flask 웹 대시보드를 띄우고, 백그라운드에서 파이프라인을 자동 반복 실행
 
-    흐름: 크롤링 → 다운로드 → GPU 추출(YOLO+MediaPipe) → 품질 검사 → 업로드
+    흐름: 크롤링 → 다운로드 → GPU 추출(YOLO+RTMPose WholeBody) → 품질 검사 → 업로드
     대시보드에서 실시간 모니터링 가능
 
     Args:

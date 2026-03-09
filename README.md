@@ -23,10 +23,10 @@
        (keyword expansion)  fallback   └── NPZ 저장    cache
 
    ※ 실패한 단계가 있어도 기존 데이터로 다음 단계 계속 진행
-   ※ 서버가 켜져 있으면 30초 간격으로 무한 반복 실행
+   ※ 서버가 켜져 있으면 60초 간격으로 무한 반복 실행
 ```
 
-## ✅ 구현 완료 기능 (v3.0.0 — RTMPose MVP)
+## ✅ 구현 완료 기능 (v3.1.0 — RTMPose MVP 5,000)
 
 ### 🔍 1단계: 크롤링 (Crawl)
 - **다국어 키워드 생성기** (`ingestion/keyword_generator.py`)
@@ -100,8 +100,9 @@
   - 파이프라인 진행률 시각화, Start/Stop 제어
   - **실시간 로그 스트리밍**
   - **GPU/VRAM 사용량 모니터링**
-  - **Redis 캐시 통계**
+  - **Redis 캐시 통계** (서버 keyspace_hits/misses 기반 실시간 히트율)
   - DB 통계, Jobs/Quality/Videos/Episodes/IL Data 페이지
+  - **자동 파이프라인 모드** (`--auto-pipeline`): 무한 반복 실행 + 대시보드 통합
   - **작업 히스토리 영속화** (`data/jobs_history.json`) — 재시작 후에도 유지
 - **알림 시스템** (`alerts/`)
   - Slack + Email 알림 (AlertManager)
@@ -113,7 +114,7 @@
   - `run-once`: 단일 파이프라인 실행
   - `run-forever`: CLI만으로 무한 루프
 - **파이프라인 복원력**: 단계 실패 시에도 기존 데이터로 다음 단계 계속 진행
-- **무한 반복**: 서버가 켜져 있으면 30초 간격으로 전체 파이프라인 계속 순환
+- **무한 반복**: 서버가 켜져 있으면 60초 간격으로 전체 파이프라인 계속 순환
 
 ## 📦 모듈 구조
 
@@ -270,8 +271,11 @@ pytest tests/ -v
 
 ```bash
 # 웹 대시보드 + 자동 파이프라인 무한 반복
-# crawl → download → detect → build_il → quality → upload → 30초 대기 → 반복
-python main.py serve --target 500 --port 5000
+# crawl → download → detect → build_il → quality → upload → 60초 대기 → 반복
+python dashboard/web_app.py --auto-pipeline --target 5000 --interval 60 --port 5000
+
+# 또는 main.py 서브 커맨드
+python main.py serve --target 5000 --port 5000
 
 # 대시보드 접속: http://localhost:5000
 ```
@@ -280,11 +284,11 @@ python main.py serve --target 500 --port 5000
 
 ```bash
 # 파이프라인 1회 실행
-python main.py run-once --target 500
+python main.py run-once --target 5000
 
 # 특정 단계만 실행
-python mass_collector.py --target 100 --stage crawl
-python mass_collector.py --target 100 --stage detect
+python mass_collector.py --target 5000 --stage crawl
+python mass_collector.py --target 5000 --stage detect
 ```
 
 ## 🔧 CLI 옵션
@@ -292,18 +296,18 @@ python mass_collector.py --target 100 --stage detect
 ### main.py
 ```bash
 # serve: 웹 대시보드 + 자동 파이프라인 (기본 모드)
-python main.py serve --target 500 --port 5000
+python main.py serve --target 5000 --port 5000
 
 # run-once: 단일 실행
-python main.py run-once --target 500 --stage crawl
+python main.py run-once --target 5000 --stage crawl
 
 # run-forever: CLI 무한 루프
-python main.py run-forever --target 500
+python main.py run-forever --target 5000
 ```
 
 ### mass_collector.py
 ```bash
---target N          # 목표 영상 수 (기본: 500)
+--target N          # 목표 영상 수 (기본: 5000)
 --stage STAGE       # 실행 단계: crawl/download/detect/build_il/quality/upload
 --keywords KW       # 키워드 (콤마 구분)
 --sources SRC       # 소스: youtube,google_videos
@@ -359,17 +363,17 @@ for t in range(len(actions)):
 | 영역 | 기술 |
 |------|------|
 | **언어** | Python 3.13+ |
-| **크롤링** | yt-dlp 2026.2, aiohttp, requests |
+| **크롤링** | yt-dlp 2026.2, aiohttp 3.13, requests 2.32, Scrapy 2.14 |
 | **포즈 추출** | RTMPose WholeBody (DWPose) — ONNX Runtime GPU 1.24 |
 | **객체 검출** | YOLOv8 (ultralytics 8.4), YOLOX-L (ONNX) |
-| **GPU** | CUDA 12.6, PyTorch 2.7, CUDA 3-Stream 병렬 (듀얼 GPU), CPU 폴백 |
-| **데이터** | NumPy 2.2, Polars 1.38, SciPy 1.17, h5py |
-| **클라우드** | AWS S3 (boto3) |
-| **DB** | PostgreSQL 14 (SQLAlchemy 2.0) |
-| **큐/캐시** | Redis 7+ |
-| **웹 UI** | Flask 3.1, Bootstrap 5, 실시간 로그 |
-| **로봇 ML** | LeRobot 0.3.4, HuggingFace Hub, Diffusers |
-| **모니터링** | loguru, psutil, GPU/VRAM 모니터 |
+| **GPU** | CUDA 12.6+, PyTorch 2.10, CUDA 3-Stream 병렬, CPU 폴백 |
+| **데이터** | NumPy 2.4, Polars 1.38, SciPy 1.17, h5py, Pandas 3.0 |
+| **클라우드** | AWS S3 (boto3 1.42) |
+| **DB** | PostgreSQL 14+ (SQLAlchemy 2.0) |
+| **큐/캐시** | Redis 7+ (redis-py 5.0), Celery 5.6 |
+| **웹 UI** | Flask 3.0, 실시간 로그, Redis 캐시 모니터 |
+| **로봇 ML** | LeRobot, HuggingFace Hub, Diffusers (선택) |
+| **모니터링** | loguru 0.7, psutil 7.2, GPU/VRAM 모니터 |
 | **테스트** | pytest 9.0 |
 
 ## 🖥️ 시스템 요구사항

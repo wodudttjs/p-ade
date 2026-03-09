@@ -41,7 +41,7 @@ class StreamConfig:
     vram_limit_gb: float = 9.0        # 단일 GPU VRAM 한계 (레거시 호환)
     target_fps: int = 30              # 기본 타겟 FPS
     long_video_fps: int = 15          # 긴 영상(60초+) FPS
-    long_video_threshold_sec: int = 60
+    long_video_threshold_sec: int = 600  # 10분 이하는 GPU, 초과만 CPU
 
     def __post_init__(self):
         if self.gpu_ids is None:
@@ -164,13 +164,13 @@ class GPU3StreamManager:
             return 2
 
     def get_batch_size_by_duration(self, duration_sec: float) -> int:
-        """영상 길이별 배치 크기 결정"""
+        """영상 길이별 배치 크기 결정 (모두 GPU 처리)"""
         if duration_sec < 30:
             return 4   # 짧은 영상: batch 4
-        elif duration_sec <= 60:
+        elif duration_sec <= 120:
             return 2   # 중간 영상: batch 2
         else:
-            return 0   # 긴 영상: CPU 워커로 위임
+            return 1   # 긴 영상: GPU에서 1개씩 안전하게 처리
 
     def get_optimal_fps(self, video_duration_sec: float) -> int:
         """영상 길이에 따른 최적 FPS 결정"""
@@ -205,31 +205,20 @@ class GPU3StreamManager:
         start_time = time.time()
         results: List[Dict[str, Any]] = []
 
-        # ── 영상 길이별 분류 ──
-        from gpu.cpu_worker_pool import CPUWorkerPool
-        short_paths, long_paths = CPUWorkerPool.split_by_duration(
-            video_paths, threshold_sec=self.config.long_video_threshold_sec
-        )
+        # ── 모든 영상을 GPU로 처리 ──
+        # RTMPose/YOLO는 프레임 단위 추론이므로 영상 길이와 무관하게 VRAM 안전.
+        # CPU 분기는 GPU 대비 10~50x 느려서 파이프라인 병목 원인이었음.
+        all_paths = list(video_paths)
 
         logger.info(
-            f"🎬 배치 처리 시작: 총 {len(video_paths)}개 "
-            f"(GPU: {len(short_paths)}개, CPU: {len(long_paths)}개)"
+            f"🎬 배치 처리 시작: 총 {len(all_paths)}개 (전부 GPU 처리)"
         )
 
-        # ── 긴 영상 → CPU WorkerPool (비동기) ──
-        cpu_future = None
-        if long_paths:
-            import concurrent.futures
-            cpu_pool = CPUWorkerPool()
-            _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            cpu_future = _executor.submit(cpu_pool.process, long_paths, output_dir)
+        if all_paths:
+            batch_size = min(len(all_paths), self.auto_adjust_batch_size())
 
-        # ── 짧은/중간 영상 → GPU 6-Stream ──
-        if short_paths:
-            batch_size = min(len(short_paths), self.auto_adjust_batch_size())
-
-            for i in range(0, len(short_paths), batch_size):
-                batch = short_paths[i:i + batch_size]
+            for i in range(0, len(all_paths), batch_size):
+                batch = all_paths[i:i + batch_size]
 
                 # VRAM 상태 확인 (GPU별)
                 for gpu_id in self.config.gpu_ids:
@@ -242,18 +231,8 @@ class GPU3StreamManager:
                 batch_results = self._process_batch_parallel(batch, processor)
                 results.extend(batch_results)
 
-                progress = (i + len(batch)) / max(len(short_paths), 1) * 100
-                logger.info(f"  GPU 진행률: {i + len(batch)}/{len(short_paths)} ({progress:.1f}%)")
-
-        # ── CPU 결과 수집 ──
-        if cpu_future is not None:
-            try:
-                cpu_results = cpu_future.result(timeout=3600)  # 1시간 타임아웃
-                results.extend(cpu_results)
-            except Exception as e:
-                logger.error(f"CPU WorkerPool 오류: {e}")
-            finally:
-                _executor.shutdown(wait=False)
+                progress = (i + len(batch)) / max(len(all_paths), 1) * 100
+                logger.info(f"  GPU 진행률: {i + len(batch)}/{len(all_paths)} ({progress:.1f}%)")
 
         elapsed = time.time() - start_time
 

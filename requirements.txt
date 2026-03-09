@@ -1,26 +1,28 @@
 # ============================================
 # P-ADE (Physical AI Data Engine) - Dependencies
-# Python 3.13+  |  CUDA 12.6  |  Ubuntu 22.04+
-# Last updated: 2026-03-04
+# Python 3.13+  |  CUDA 12.6+  |  Ubuntu 22.04+
+# Last updated: 2026-03-09
 # ============================================
 
 # --- Core ---
-numpy==2.2.6
+numpy==2.4.2
 scipy==1.17.0
-pandas==2.3.3
-polars==1.38.1
+pandas==3.0.0
+polars==1.38.0
 
 # --- Web Crawling & Download ---
 yt-dlp==2026.2.4
-requests==2.32.4
-aiohttp==3.13.2
+requests==2.32.5
+aiohttp==3.13.3
+Scrapy==2.14.1
 
 # --- Computer Vision & Pose Estimation ---
 opencv-python==4.13.0.92
-ultralytics==8.4.14
+opencv-contrib-python==4.13.0.92
+ultralytics==8.4.12
 ultralytics-thop==2.0.18
-torch==2.7.1
-torchvision==0.22.1
+torch==2.10.0
+torchvision==0.25.0
 onnxruntime-gpu==1.24.2          # RTMPose WholeBody 추론 (CUDA EP)
 
 # --- Database ---
@@ -28,43 +30,32 @@ SQLAlchemy==2.0.46
 psycopg2-binary==2.9.11
 
 # --- Web Dashboard ---
-Flask==3.1.2
-flask-cors==6.0.2
+Flask==3.0.0
+Flask-Cors==4.0.0
 Jinja2==3.1.6
 
 # --- Task Queue & Cache ---
-redis==7.2.1
+redis==5.0.1
+celery==5.6.2
+
+# --- Cloud Storage ---
+boto3==1.42.42
 
 # --- Monitoring & Logging ---
 loguru==0.7.3
-psutil==7.1.2
+psutil==7.2.2
 
 # --- Data Processing ---
 h5py==3.15.1
 matplotlib==3.10.8
-pillow==12.0.0
-protobuf==6.33.0
-imageio==2.37.0
-imageio-ffmpeg==0.6.0
-av==16.0.1
-
-# --- ML / Robotics ---
-datasets==3.6.0
-diffusers==0.35.2
-safetensors==0.6.2
-huggingface-hub==1.0.1
-einops==0.8.1
-gymnasium==0.29.1
-lerobot==0.3.4
+pillow==12.1.0
+protobuf==4.25.8
+ffmpeg-python==0.2.0
 
 # --- Config & Utils ---
-python-dotenv==1.1.0
+python-dotenv==1.2.1
 PyYAML==6.0.3
-click==8.2.1
-rich==13.9.4
-tqdm==4.67.1
-pydantic==2.11.7
-pydantic-settings==2.6.1
+click==8.3.1
 
 # --- Testing ---
 pytest==9.0.2

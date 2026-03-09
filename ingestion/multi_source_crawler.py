@@ -732,10 +732,19 @@ class MultiSourceCrawler:
         stats = CrawlStats()
         all_results: List[CrawlResult] = []
         
-        for async_result in async_results:
+        # async_results는 Dict[str, List[AsyncCrawlResult]] 형태
+        flat_results = []
+        if isinstance(async_results, dict):
+            for source_key, result_list in async_results.items():
+                if isinstance(result_list, list):
+                    flat_results.extend(result_list)
+        elif isinstance(async_results, list):
+            flat_results = async_results
+        
+        for async_result in flat_results:
             stats.total_searched += 1
             
-            if async_result.error:
+            if not hasattr(async_result, 'error') or async_result.error:
                 stats.total_errors += 1
                 continue
             

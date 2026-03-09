@@ -48,6 +48,7 @@ data/urls.csv
 
 # Logs
 logs/*.log
+logs/*.log.zip
 *.log
 
 # Database

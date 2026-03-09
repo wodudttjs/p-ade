@@ -62,7 +62,7 @@ logger = setup_logger(__name__)
 class PipelineConfig:
     """파이프라인 설정"""
     # 수집 목표
-    target_count: int = 5000
+    target_count: int = 3000
     
     # 크롤링 설정
     sources: List[str] = field(default_factory=lambda: ["youtube", "google_videos", "vimeo", "bilibili"])
@@ -536,22 +536,33 @@ class MassCollector:
         output_dir = Path(self.config.raw_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # CSV에서 URL 로드
+        # CSV + DB 병합 로드 (CSV만 있으면 DB 2,411개가 무시되는 버그 수정)
+        seen_ids = set()
         videos = []
+
+        # 1) CSV에서 URL 로드
         if csv_path.exists():
             with csv_path.open("r", encoding="utf-8") as f:
                 reader = csv_module.DictReader(f)
                 for row in reader:
-                    if row.get("url") and row.get("video_id"):
+                    vid = row.get("video_id", "")
+                    if row.get("url") and vid and vid not in seen_ids:
+                        seen_ids.add(vid)
                         videos.append({
-                            "video_id": row["video_id"],
+                            "video_id": vid,
                             "url": row["url"],
                             "title": row.get("title", ""),
                         })
 
-        if not videos:
-            # DB에서 로드 시도
-            videos = self._load_videos_from_db()
+        # 2) DB에서 discovered 상태 비디오도 병합
+        db_videos = self._load_videos_from_db()
+        for v in db_videos:
+            vid = v.get("video_id", "")
+            if vid and vid not in seen_ids:
+                seen_ids.add(vid)
+                videos.append(v)
+
+        logger.info(f"다운로드 후보: CSV {len(seen_ids) - len(db_videos)}개 + DB {len(db_videos)}개 → 총 {len(videos)}개")
 
         if not videos:
             return StageResult(
@@ -642,8 +653,8 @@ class MassCollector:
 
     def _stage_process(self) -> StageResult:
         """
-        1-Pass 통합 처리: YOLO 객체 검출 + MediaPipe 포즈 추출 + State-Action 인코딩
-        비디오 1회 디코딩으로 Detect+IL을 동시에 처리 (처리 시간 40% 단축 목표)
+        1-Pass 통합 처리: YOLO 객체 검출 + RTMPose WholeBody 포즈 추출 + State-Action 인코딩
+        비디오 1회 디코딩으로 Detect+IL을 동시에 처리 (COCO 17 + Hands, SO-101 기준)
         """
         start = time.time()
         raw_dir = Path(self.config.raw_dir)
@@ -760,7 +771,11 @@ class MassCollector:
         )
 
     def _stage_cleanup(self) -> StageResult:
-        """정리 단계: 처리 완료된 원본 MP4 삭제, 품질 탈락 NPZ 삭제, 통계 출력"""
+        """정리 단계: S3 업로드된 원본 MP4 삭제, 품질 탈락 NPZ 삭제, 통계 출력
+
+        주의: 원본 MP4는 해당 에피소드가 S3에 업로드 완료된 경우에만 삭제합니다.
+              아직 업로드되지 않은 에피소드의 원본 MP4는 보존합니다.
+        """
         start = time.time()
         total_deleted = 0
         total_freed = 0.0
@@ -772,17 +787,29 @@ class MassCollector:
                 episodes_dir=self.config.episodes_dir,
             )
 
-            # 처리 완료된 원본 MP4 삭제 (에피소드가 있는 영상의 원본)
-            episodes_dir = Path(self.config.episodes_dir)
-            if episodes_dir.exists():
-                processed_ids = [
-                    p.stem.replace("_episode", "")
-                    for p in episodes_dir.glob("*.npz")
-                ]
-                if processed_ids:
-                    count, freed = disk.cleanup_raw_videos(video_ids=processed_ids)
-                    total_deleted += count
-                    total_freed += freed
+            # S3 업로드 완료된 비디오의 원본 MP4만 삭제
+            # DB에서 'uploaded' 상태인 video_id만 대상으로 함
+            uploaded_ids = []
+            try:
+                import sqlite3
+                db_file = Path(self.config.db_path)
+                if not db_file.is_absolute():
+                    db_file = project_root / db_file
+                if db_file.exists():
+                    conn = sqlite3.connect(str(db_file))
+                    cur = conn.execute("SELECT video_id FROM videos WHERE status = 'uploaded'")
+                    uploaded_ids = [row[0] for row in cur.fetchall()]
+                    conn.close()
+            except Exception as e:
+                logger.warning(f"DB에서 업로드 상태 조회 실패: {e}")
+
+            if uploaded_ids:
+                count, freed = disk.cleanup_raw_videos(video_ids=uploaded_ids)
+                total_deleted += count
+                total_freed += freed
+                print(f"  🗑️ S3 업로드 완료된 MP4 삭제: {count}개, {freed:.2f}GB")
+            else:
+                print(f"  ℹ️ S3 업로드 완료된 MP4 없음 — 원본 보존")
 
             # 품질 탈락 NPZ 삭제
             count, freed = disk.cleanup_rejected()

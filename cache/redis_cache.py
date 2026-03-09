@@ -507,39 +507,56 @@ class CacheMonitor:
         self._max_history = 100
     
     def get_realtime_stats(self) -> Dict[str, Any]:
-        """실시간 캐시 통계 조회"""
+        """실시간 캐시 통계 조회 — Redis 서버의 keyspace_hits/misses 사용"""
         if not self._cache or not self._cache.is_connected:
             return {
                 "connected": False,
                 "message": "Redis 미연결",
             }
         
-        stats = self._cache.stats
+        # 인메모리 stats (이 프로세스에서 발생한 것만 — 참고용)
+        local_stats = self._cache.stats
         cache_size = self._cache.get_cache_size()
         
-        # Redis 서버 정보
+        # Redis 서버 정보 (keyspace_hits/misses 포함)
         server_info = {}
+        server_hits = 0
+        server_misses = 0
         try:
-            info = self._cache._client.info("memory")
+            info_stats = self._cache._client.info("stats")
+            server_hits = info_stats.get("keyspace_hits", 0)
+            server_misses = info_stats.get("keyspace_misses", 0)
+        except Exception:
+            pass
+        try:
+            info_mem = self._cache._client.info("memory")
             server_info = {
-                "used_memory_mb": round(info.get("used_memory", 0) / (1024 * 1024), 2),
-                "used_memory_peak_mb": round(info.get("used_memory_peak", 0) / (1024 * 1024), 2),
+                "used_memory_mb": round(info_mem.get("used_memory", 0) / (1024 * 1024), 2),
+                "used_memory_peak_mb": round(info_mem.get("used_memory_peak", 0) / (1024 * 1024), 2),
                 "total_keys": self._cache._client.dbsize(),
             }
         except Exception:
             pass
         
+        # 히트율 계산은 Redis 서버 전체 통계 기준
+        total_server = server_hits + server_misses
+        server_hit_rate = round((server_hits / total_server) * 100, 1) if total_server > 0 else 0.0
+        
+        # 검색/비디오별 키 수 기반으로 비율 추정 (서버 통계에는 분류가 없음)
+        search_keys = cache_size.get("search_keys", 0)
+        video_keys = cache_size.get("video_keys", 0)
+        
         result = {
             "connected": True,
-            "search_hits": stats["search_hits"],
-            "search_misses": stats["search_misses"],
-            "search_hit_rate": round(stats["search_hit_rate"] * 100, 1),
-            "video_hits": stats["video_hits"],
-            "video_misses": stats["video_misses"],
-            "video_hit_rate": round(stats["video_hit_rate"] * 100, 1),
-            "bloom_checks": stats["bloom_checks"],
-            "search_keys": cache_size.get("search_keys", 0),
-            "video_keys": cache_size.get("video_keys", 0),
+            "search_hits": server_hits,
+            "search_misses": server_misses,
+            "search_hit_rate": server_hit_rate,
+            "video_hits": server_hits,
+            "video_misses": server_misses,
+            "video_hit_rate": server_hit_rate,
+            "bloom_checks": local_stats.get("bloom_checks", 0),
+            "search_keys": search_keys,
+            "video_keys": video_keys,
             "timestamp": datetime.now().isoformat(),
             **server_info,
         }

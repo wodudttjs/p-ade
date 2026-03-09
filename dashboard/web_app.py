@@ -75,6 +75,7 @@ pipeline_state = {
         "crawl": 0,
         "download": 0,
         "detect": 0,
+        "process": 0,
         "build_il": 0,
         "quality": 0,
         "upload": 0,
@@ -141,7 +142,7 @@ def get_db_connection():
 
 
 def get_file_stats() -> Dict[str, int]:
-    """파일 기반 통계"""
+    """파일 + DB 병합 통계"""
     data_dir = PROJECT_ROOT / "data"
     stats = {
         "raw_videos": 0,
@@ -153,22 +154,30 @@ def get_file_stats() -> Dict[str, int]:
     }
     
     try:
-        # DB 기반 통계 우선 (5K 스케일 대응)
+        # 파일시스템 기반 (실제 파일 수)
+        raw_dir = data_dir / "raw"
+        if raw_dir.exists():
+            mp4_files = list(raw_dir.glob("*.mp4"))
+            stats["raw_videos"] = len(mp4_files)
+            stats["total_size_mb"] += sum(f.stat().st_size for f in mp4_files) / (1024 * 1024)
+        
+        episodes_dir = data_dir / "episodes"
+        if episodes_dir.exists():
+            npz_files = list(episodes_dir.glob("*_episode.npz"))
+            stats["episodes"] = len(npz_files)
+            stats["il_episodes"] = len(npz_files)
+            stats["poses"] = len(npz_files)
+            stats["total_size_mb"] += sum(f.stat().st_size for f in npz_files) / (1024 * 1024)
+        
+        # DB에서 uploaded 카운트만 보강
         conn = get_db_connection()
         if conn:
             try:
-                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'downloaded'")
-                stats["raw_videos"] = cur.fetchone()[0]
                 cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status = 'uploaded'")
                 stats["uploaded"] = cur.fetchone()[0]
-                cur = conn.execute("SELECT COUNT(*) FROM videos WHERE status IN ('processed', 'uploaded')")
-                stats["episodes"] = cur.fetchone()[0]
                 conn.close()
             except Exception:
                 conn.close()
-                stats = _get_file_stats_fallback(data_dir, stats)
-        else:
-            stats = _get_file_stats_fallback(data_dir, stats)
     except Exception:
         pass
     
@@ -243,7 +252,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>P-ADE Dashboard</title>
+    <title>P-ADE Dashboard — RTMPose MVP 5K</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
     <style>
@@ -593,7 +602,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 <span class="status-dot" id="db-status-dot"></span>
                 <span id="db-status-text">Checking...</span>
             </div>
-            <div style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 11px;">v1.0.0</div>
+            <div style="text-align: center; margin-top: 10px; color: var(--text-secondary); font-size: 11px;">v2.0.0 (RTMPose MVP)</div>
         </div>
     </aside>
     <main class="main-content">
@@ -621,15 +630,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                                 <div class="stage-progress"><div class="bar download" id="progress-download" style="width: 0%"></div></div>
                             </div>
                             <div class="stage-item">
-                                <div class="stage-label">🔍 감지</div>
-                                <div class="stage-progress"><div class="bar detect" id="progress-detect" style="width: 0%"></div></div>
+                                <div class="stage-label">🤖 GPU 처리<br><small style="color:var(--accent-purple);font-size:10px;">RTMPose + COCO17</small></div>
+                                <div class="stage-progress"><div class="bar" id="progress-process" style="width: 0%; background: var(--accent-purple, #a78bfa);"></div></div>
                             </div>
                             <div class="stage-item">
-                                <div class="stage-label">🤖 모방학습</div>
-                                <div class="stage-progress"><div class="bar" id="progress-build-il" style="width: 0%; background: var(--accent-purple, #a78bfa);"></div></div>
-                            </div>
-                            <div class="stage-item">
-                                <div class="stage-label">📊 품질평가</div>
+                                <div class="stage-label">📊 품질평가<br><small style="color:var(--accent-green);font-size:10px;">SO-101 4DOF</small></div>
                                 <div class="stage-progress"><div class="bar" id="progress-quality" style="width: 0%; background: var(--accent-green, #34d399);"></div></div>
                             </div>
                             <div class="stage-item">
@@ -679,7 +684,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon" style="background: rgba(167,139,250,0.2); color: #a78bfa;"><i class="bi bi-robot"></i></div>
                         <div class="value" id="card-il-episodes">0</div>
-                        <div class="label">IL 에피소드</div>
+                        <div class="label">IL 에피소드 (RTMPose)</div>
                     </div>
                 </div>
                 
@@ -949,14 +954,14 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 
                 <div class="charts-grid">
                     <div class="chart-card">
-                        <h3><i class="bi bi-bar-chart"></i> 등급별 분포 (A~D: 통과, F: 실패)</h3>
+                        <h3><i class="bi bi-bar-chart"></i> 등급별 분포 (A~D: 통과, F: 실패) — RTMPose COCO 17 기준</h3>
                         <div id="quality-grade-chart" style="height: 250px; display: flex; align-items: flex-end; gap: 15px; padding: 20px;">
                             <p style="color: var(--text-secondary);">등급 데이터 로딩 중...</p>
                         </div>
                     </div>
                     
                     <div class="chart-card">
-                        <h3><i class="bi bi-clipboard-data"></i> 품질 메트릭 상세</h3>
+                        <h3><i class="bi bi-clipboard-data"></i> 품질 메트릭 상세 (RTMPose COCO 17)</h3>
                         <div id="quality-metrics-detail" style="padding: 20px;">
                             <p style="color: var(--text-secondary);">메트릭 데이터 로딩 중...</p>
                         </div>
@@ -1052,6 +1057,18 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                                 <option value="yolov8m">YOLOv8 Medium</option>
                             </select>
                         </div>
+                        <div class="form-group">
+                            <label class="form-label">포즈 추출 모델</label>
+                            <select class="form-control-dark" id="setting-pose-model" disabled>
+                                <option value="rtmpose" selected>RTMPose WholeBody (COCO 17)</option>
+                            </select>
+                            <small style="color:var(--accent-purple);font-size:11px;">✅ GPU ONNX | 17 body + 42 hand keypoints</small>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">품질 통과 임계값</label>
+                            <input type="number" class="form-control-dark" id="setting-quality-threshold" value="50" min="10" max="100" step="5">
+                            <small style="color:var(--text-secondary);font-size:11px;">RTMPose 기준 50점 이상 통과</small>
+                        </div>
                     </div>
                 </div>
                 
@@ -1080,12 +1097,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     <div class="stat-card">
                         <div class="icon yellow"><i class="bi bi-layers"></i></div>
                         <div class="value" id="il-state-dim">—</div>
-                        <div class="label">상태 차원</div>
+                        <div class="label">상태 차원 (COCO 17)</div>
                     </div>
                     <div class="stat-card">
                         <div class="icon purple"><i class="bi bi-joystick"></i></div>
                         <div class="value" id="il-action-dim">—</div>
-                        <div class="label">행동 차원</div>
+                        <div class="label">행동 차원 (SO-101 DOF)</div>
                     </div>
                 </div>
                 
@@ -1329,11 +1346,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 document.getElementById('cache-video-keys').textContent = c.video_keys != null ? c.video_keys : '—';
                 document.getElementById('cache-memory').textContent = c.used_memory_mb != null ? `${c.used_memory_mb} MB` : '—';
                 
-                const hits = (c.search_hits || 0) + (c.video_hits || 0);
-                const misses = (c.search_misses || 0) + (c.video_misses || 0);
+                const hits = c.search_hits || 0;
+                const misses = c.search_misses || 0;
                 const total = hits + misses;
-                document.getElementById('cache-hits-count').textContent = hits;
-                document.getElementById('cache-misses-count').textContent = misses;
+                document.getElementById('cache-hits-count').textContent = hits.toLocaleString();
+                document.getElementById('cache-misses-count').textContent = misses.toLocaleString();
                 document.getElementById('cache-hit-ratio-bar').style.width = total > 0 ? `${(hits/total)*100}%` : '0%';
                 document.getElementById('cache-miss-ratio-bar').style.width = total > 0 ? `${(misses/total)*100}%` : '0%';
             } catch(e) {
@@ -1349,12 +1366,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             if (btnStop) btnStop.disabled = !pipeline.is_running;
             
             // 각 스테이지 진행률 업데이트
-            const stageIds = ['crawl', 'download', 'detect', 'build_il', 'quality', 'upload'];
+            const stageIds = ['crawl', 'download', 'process', 'quality', 'upload'];
             const stageBarIds = {
                 'crawl': 'progress-crawl',
                 'download': 'progress-download',
-                'detect': 'progress-detect',
-                'build_il': 'progress-build-il',
+                'process': 'progress-process',
                 'quality': 'progress-quality',
                 'upload': 'progress-upload',
             };
@@ -1382,12 +1398,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
             
             let status = '준비 완료';
             const stageLabels = {
-                'crawl': '📡 크롤링', 'download': '📥 다운로드', 'detect': '🔍 GPU 감지',
+                'crawl': '📡 크롤링', 'download': '📥 다운로드', 'detect': '🤖 GPU+RTMPose',
                 'build_il': '🤖 모방학습 생성', 'quality': '📊 품질평가', 'upload': '☁️ 업로드'
             };
             if (pipeline.is_running) {
-                const label = stageLabels[pipeline.current_stage] || pipeline.current_stage || '초기화 중...';
-                status = `▶ 실행 중: ${label}`;
+                if (pipeline.current_stage === 'waiting') {
+                    status = `⏳ 반복 #${pipeline.iteration || '?'} 완료 — 다음 반복 대기 중...`;
+                } else {
+                    const label = stageLabels[pipeline.current_stage] || pipeline.current_stage || '초기화 중...';
+                    status = `▶ 실행 중 [#${pipeline.iteration || '?'}]: ${label}`;
+                }
             } else if (total > 0 && total < 100) status = '⏸ 대기 중 (다음 반복 준비)';
             else if (total >= 100) status = '✅ 파이프라인 완료';
             document.getElementById('pipeline-status').textContent = status;
@@ -1451,15 +1471,20 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 
                 // 현재 단계 표시
                 const stageLabels = {
-                    'crawl': '📡 크롤링', 'download': '📥 다운로드', 'detect': '🔍 GPU 감지',
-                    'build_il': '🤖 모방학습', 'quality': '📊 품질평가', 'upload': '☁️ 업로드'
+                    'crawl': '📡 크롤링', 'download': '📥 다운로드', 'process': '🤖 GPU+RTMPose',
+                    'quality': '📊 품질평가', 'upload': '☁️ S3 업로드', 'waiting': '⏳ 대기 중'
                 };
                 const curStage = pipeline.current_stage;
                 const iterNum = pipeline.iteration || 0;
                 
                 if (pipeline.is_running) {
-                    document.getElementById('jobs-current-stage').textContent = 
-                        `▶ ${stageLabels[curStage] || curStage || '초기화 중...'} (반복 #${iterNum})`;
+                    if (curStage === 'waiting') {
+                        document.getElementById('jobs-current-stage').textContent = 
+                            `⏳ 다음 반복 대기 중 (${iterNum}회 완료)`;
+                    } else {
+                        document.getElementById('jobs-current-stage').textContent = 
+                            `▶ ${stageLabels[curStage] || curStage || '초기화 중...'} (반복 #${iterNum})`;
+                    }
                 } else {
                     document.getElementById('jobs-current-stage').textContent = 
                         iterNum > 0 ? `대기 중 (${iterNum}회 완료)` : '대기 중';
@@ -1470,7 +1495,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                     (pipeline.last_progress && Object.keys(pipeline.last_progress).length > 0 ? pipeline.last_progress : pipeline.progress);
                 
                 // 완료 단계 카운트
-                const allStages = ['crawl','download','detect','build_il','quality','upload'];
+                const allStages = ['crawl','download','process','quality','upload'];
                 const completed = allStages.filter(s => (displayProgress[s] || 0) >= 100).length;
                 document.getElementById('jobs-completed-count').textContent = `${completed}/${allStages.length}`;
                 
@@ -1667,7 +1692,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 const gradeChart = document.getElementById('quality-grade-chart');
                 if (data.grades && Object.keys(data.grades).length > 0) {
                     const gradeColors = {A:'#22c55e', B:'#34d399', C:'#facc15', D:'#f97316', F:'#dc2626'};
-                    const gradeLabels = {A:'A (90+)', B:'B (80-89)', C:'C (70-79)', D:'D (60-69)', F:'F (실패)'};
+                    const gradeLabels = {A:'A (90+)', B:'B (80-89)', C:'C (70-79)', D:'D (50-69)', F:'F (50미만)'};
                     const grades = ['A','B','C','D','F'];
                     const maxG = Math.max(...grades.map(g => data.grades[g] || 0), 1);
                     gradeChart.innerHTML = grades.map(g => {
@@ -1696,7 +1721,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             <div class="stat-row"><span class="stat-label">✊ 파지 동작 (20점)</span><span class="stat-value">${m.grasp_motion?.toFixed(1) || '—'}</span></div>
                             <div class="stat-row"><span class="stat-label">📐 안정성 (15점)</span><span class="stat-value">${m.stability?.toFixed(1) || '—'}</span></div>
                             <div class="stat-row"><span class="stat-label">📏 커버리지 (10점)</span><span class="stat-value">${m.coverage?.toFixed(1) || '—'}</span></div>
-                            <div class="stat-row"><span class="stat-label">🎯 통과 임계값</span><span class="stat-value">${data.threshold || 60}점</span></div>
+                            <div class="stat-row"><span class="stat-label">🎯 통과 임계값</span><span class="stat-value">${data.threshold || 50}점</span></div>
                         </div>
                     `;
                 } else {
@@ -1861,7 +1886,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                         <td>${ep.frames}</td>
                         <td>${ep.state_dim}</td>
                         <td>${ep.action_dim}</td>
-                        <td><span style="color:${ep.confidence > 0.3 ? 'var(--accent-green)' : 'var(--accent-red)'}">${ep.confidence.toFixed(3)}</span></td>
+                        <td><span style="color:${ep.confidence > 0.1 ? 'var(--accent-green)' : 'var(--accent-red)'}">${ep.confidence.toFixed(3)}</span></td>
                         <td>${ep.gripper.toFixed(3)}</td>
                         <td>${ep.size_kb} KB</td>
                     </tr>`).join('');
@@ -2596,7 +2621,7 @@ def api_quality():
     if episodes_dir.exists():
         try:
             from quality.evaluator import RobotArmQualityEvaluator, QualityConfig
-            config = QualityConfig(pass_threshold=60.0)
+            config = QualityConfig()  # 기본값 사용 (pass_threshold=50, early_reject_min_confidence=0.1)
             evaluator = RobotArmQualityEvaluator(config=config)
             result["threshold"] = config.pass_threshold
             
@@ -2615,6 +2640,8 @@ def api_quality():
                         "body": data.get("poses", data.get("body_landmarks", np.array([]))),
                         "left_hand": data.get("left_hand", data.get("left_hand_landmarks", np.array([]))),
                         "right_hand": data.get("right_hand", data.get("right_hand_landmarks", np.array([]))),
+                        "confidence": data.get("confidence", np.array([])),
+                        "gripper_state": data.get("gripper_state", np.array([])),
                     }
                     for k, v in sequence.items():
                         if isinstance(v, np.ndarray) and v.size == 0:
@@ -3472,39 +3499,58 @@ def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = Fal
     # 자동 파이프라인 실행
     if auto_pipeline:
         def auto_pipeline_loop():
-            """서버 시작 시 자동 파이프라인 반복"""
+            """서버 시작 시 자동 파이프라인 무한 반복 (대시보드 실시간 모니터링 연동)"""
             import time as _time
-            _time.sleep(3)  # Flask 서버 시작 대기
-            
+            _time.sleep(5)  # Flask 서버 시작 대기
+
             iteration = 0
+            all_stages = ["crawl", "download", "process", "quality", "upload"]
+            stage_labels = {
+                "crawl": "📡 크롤링", "download": "📥 다운로드",
+                "process": "🤖 GPU+RTMPose", "quality": "📊 품질평가",
+                "upload": "☁️ S3 업로드",
+            }
+
             while True:
                 try:
                     iteration += 1
+                    pipeline_state["iteration"] = iteration
+
+                    # ── 진행률 리셋 ──
+                    for k in pipeline_state["progress"]:
+                        pipeline_state["progress"][k] = 0
+
                     pipeline_state["is_running"] = True
                     pipeline_state["started_at"] = datetime.now().isoformat()
-                    pipeline_state["current_stage"] = "crawl"
-                    pipeline_state["logs"].append(
-                        f"[INFO] 🔄 자동 파이프라인 #{iteration} 시작 (목표: {target_count})"
-                    )
+                    pipeline_state["current_stage"] = all_stages[0]
+
+                    _log(f"\n{'━'*50}")
+                    _log(f"[INFO] 🔄 자동 파이프라인 #{iteration} 시작 (목표: {target_count})")
 
                     env = os.environ.copy()
                     env["PYTHONIOENCODING"] = "utf-8"
 
-                    all_stages = ["crawl", "download", "detect", "build_il", "quality", "upload"]
+                    stage_map = {
+                        "crawl": "crawl", "download": "download",
+                        "process": "detect", "quality": "quality",
+                        "upload": "upload",
+                    }
 
-                    for current_stage in all_stages:
+                    for stage in all_stages:
                         if not pipeline_state["is_running"]:
+                            _log("[WARN] ⏹ 사용자에 의해 파이프라인 중지됨")
                             break
 
-                        pipeline_state["current_stage"] = current_stage
-                        pipeline_state["logs"].append(f"[INFO] ▶ {current_stage} 단계 시작...")
+                        pipeline_state["current_stage"] = stage
+                        _log(f"[INFO] ▶ {stage_labels.get(stage, stage)} 단계 시작...")
 
                         cmd = [
                             sys.executable, str(PROJECT_ROOT / "mass_collector.py"),
                             "--target", str(target_count),
-                            "--stage", current_stage,
+                            "--stage", stage_map.get(stage, stage),
                         ]
 
+                        t_start = _time.time()
                         proc = subprocess.Popen(
                             cmd, cwd=str(PROJECT_ROOT),
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -3515,42 +3561,54 @@ def run_web_dashboard(host: str = "0.0.0.0", port: int = 5000, debug: bool = Fal
                         for line in proc.stdout:
                             line = line.strip()
                             if line:
-                                pipeline_state["logs"].append(line)
-                                # 로그 크기 제한
-                                if len(pipeline_state["logs"]) > 500:
-                                    pipeline_state["logs"] = pipeline_state["logs"][-300:]
+                                _log(line)
                             if not pipeline_state["is_running"]:
                                 proc.terminate()
                                 break
 
                         proc.wait()
-                        pipeline_state["progress"][current_stage] = 100
+                        elapsed = _time.time() - t_start
+                        pipeline_state["progress"][stage] = 100
+                        _log(f"[INFO] ✅ {stage_labels.get(stage, stage)} 완료 ({elapsed:.1f}초)")
 
-                    pipeline_state["is_running"] = False
+                    # ── 반복 완료 ──
+                    pipeline_state["last_progress"] = dict(pipeline_state["progress"])
                     pipeline_state["current_stage"] = None
                     pipeline_state["process"] = None
-                    pipeline_state["logs"].append(
-                        f"[SUCCESS] ✅ 자동 파이프라인 #{iteration} 완료"
-                    )
 
-                    # 다음 반복까지 대기
-                    pipeline_state["logs"].append(
-                        f"[INFO] ⏳ {pipeline_interval}초 대기 후 다음 반복..."
-                    )
-                    _time.sleep(pipeline_interval)
+                    if pipeline_state["is_running"]:
+                        _log(f"[SUCCESS] ✅ 자동 파이프라인 #{iteration} 완료")
+                        _log(f"[INFO] ⏳ {pipeline_interval}초 대기 후 다음 반복...")
+                        # 대기 중에도 is_running=True 유지 (모니터링에서 "실행 중" 표시)
+                        pipeline_state["current_stage"] = "waiting"
 
-                    # 진행률 리셋
-                    for k in pipeline_state["progress"]:
-                        pipeline_state["progress"][k] = 0
+                        # 대기 중 1초 간격으로 중지 체크
+                        for _ in range(pipeline_interval):
+                            if not pipeline_state["is_running"]:
+                                break
+                            _time.sleep(1)
+                    else:
+                        _log(f"[INFO] ⏹ 파이프라인 #{iteration} 중지됨")
 
                 except Exception as e:
-                    pipeline_state["is_running"] = False
-                    pipeline_state["logs"].append(f"[ERROR] 파이프라인 에러: {e}")
-                    _time.sleep(300)  # 에러 시 5분 대기
+                    pipeline_state["current_stage"] = None
+                    pipeline_state["process"] = None
+                    _log(f"[ERROR] ❌ 파이프라인 에러: {e}")
+                    _log(f"[INFO] ⏳ 60초 대기 후 재시도...")
+                    for _ in range(60):
+                        if not pipeline_state["is_running"]:
+                            break
+                        _time.sleep(1)
+
+        def _log(msg: str):
+            """파이프라인 로그 추가 (크기 제한)"""
+            pipeline_state["logs"].append(msg)
+            if len(pipeline_state["logs"]) > 2000:
+                pipeline_state["logs"] = pipeline_state["logs"][-1500:]
 
         auto_thread = threading.Thread(target=auto_pipeline_loop, daemon=True)
         auto_thread.start()
-        print("🔄 자동 파이프라인 모드 활성화됨")
+        print("🔄 자동 파이프라인 모드 활성화됨 (무한 반복)")
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════════╗
